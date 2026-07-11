@@ -1,0 +1,148 @@
+import Foundation
+
+struct NotionClient {
+    let token: String
+    let databaseID: String
+
+    private static let baseURL = "https://api.notion.com/v1"
+    private static let apiVersion = "2022-06-28"
+
+    // Notion limita cada rich_text a 2000 caracteres y cada request a 100 bloques.
+    private static let maxBlockTextLength = 1900
+    private static let maxBlocksPerRequest = 90
+
+    func createVoiceNote(summary: String, keyPoints: [String], transcript: String) async throws -> URL? {
+        let titleProperty = try await titlePropertyName()
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "dd/MM/yyyy HH:mm"
+        let title = "Nota de voz — \(formatter.string(from: Date()))"
+
+        var children: [[String: Any]] = [Self.heading("Resumen")]
+        children += Self.chunkedParagraphs(summary)
+        if !keyPoints.isEmpty {
+            children.append(Self.heading("Puntos clave"))
+            children += keyPoints.map(Self.bulletedListItem)
+        }
+        children.append(["object": "block", "type": "divider", "divider": [String: String]()])
+        children.append(Self.heading("Transcripción"))
+        children += Self.chunkedParagraphs(transcript)
+
+        let firstBatch = Array(children.prefix(Self.maxBlocksPerRequest))
+        let remaining = Array(children.dropFirst(Self.maxBlocksPerRequest))
+
+        let pageBody: [String: Any] = [
+            "parent": ["database_id": databaseID],
+            "properties": [
+                titleProperty: [
+                    "title": [["text": ["content": title]]]
+                ]
+            ],
+            "children": firstBatch,
+        ]
+
+        let (body, _) = try await send("POST", path: "/pages", json: pageBody)
+        guard let page = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let pageID = page["id"] as? String else {
+            throw AppError.notionRequestFailed("respuesta inesperada al crear la página.")
+        }
+
+        // Transcripciones muy largas: agregar el resto en tandas.
+        var pending = remaining
+        while !pending.isEmpty {
+            let batch = Array(pending.prefix(Self.maxBlocksPerRequest))
+            pending = Array(pending.dropFirst(Self.maxBlocksPerRequest))
+            _ = try await send("PATCH", path: "/blocks/\(pageID)/children", json: ["children": batch])
+        }
+
+        return (page["url"] as? String).flatMap(URL.init(string:))
+    }
+
+    /// Descubre el nombre real de la propiedad título de la base de datos
+    /// (puede no llamarse "Name" si el usuario la renombró).
+    private func titlePropertyName() async throws -> String {
+        let (body, _) = try await send("GET", path: "/databases/\(databaseID)", json: nil)
+        guard let database = try JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let properties = database["properties"] as? [String: [String: Any]],
+              let titleEntry = properties.first(where: { ($0.value["type"] as? String) == "title" }) else {
+            throw AppError.notionRequestFailed("la base de datos no tiene una propiedad de título.")
+        }
+        return titleEntry.key
+    }
+
+    // MARK: - Helpers
+
+    private func send(_ method: String, path: String, json: [String: Any]?) async throws -> (Data, HTTPURLResponse) {
+        var request = URLRequest(url: URL(string: Self.baseURL + path)!)
+        request.httpMethod = method
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue(Self.apiVersion, forHTTPHeaderField: "Notion-Version")
+        if let json {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: json)
+        }
+
+        let (body, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw AppError.notionRequestFailed("respuesta inválida del servidor.")
+        }
+        switch http.statusCode {
+        case 200, 201:
+            return (body, http)
+        case 401:
+            throw AppError.notionUnauthorized
+        case 404:
+            throw AppError.notionDatabaseNotShared
+        default:
+            let snippet = String(data: body.prefix(300), encoding: .utf8) ?? ""
+            throw AppError.notionRequestFailed("HTTP \(http.statusCode). \(snippet)")
+        }
+    }
+
+    private static func heading(_ text: String) -> [String: Any] {
+        [
+            "object": "block",
+            "type": "heading_2",
+            "heading_2": ["rich_text": [["text": ["content": text]]]],
+        ]
+    }
+
+    private static func bulletedListItem(_ text: String) -> [String: Any] {
+        [
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": ["rich_text": [["text": ["content": text]]]],
+        ]
+    }
+
+    private static func paragraph(_ text: String) -> [String: Any] {
+        [
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": ["rich_text": [["text": ["content": text]]]],
+        ]
+    }
+
+    /// Trocea texto largo en párrafos de menos de 2000 caracteres (límite de
+    /// Notion por rich_text), cortando de preferencia en fin de oración.
+    private static func chunkedParagraphs(_ text: String) -> [[String: Any]] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [paragraph("—")] }
+
+        var chunks: [String] = []
+        var rest = Substring(trimmed)
+        while rest.count > maxBlockTextLength {
+            let window = rest.prefix(maxBlockTextLength)
+            let cutIndex = window.lastIndex(where: { ".!?\n".contains($0) })
+                ?? window.lastIndex(of: " ")
+                ?? window.indices.last!
+            let chunk = rest[...cutIndex]
+            chunks.append(String(chunk).trimmingCharacters(in: .whitespacesAndNewlines))
+            rest = rest[rest.index(after: cutIndex)...]
+        }
+        let tail = String(rest).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !tail.isEmpty { chunks.append(tail) }
+
+        return chunks.map(paragraph)
+    }
+}
