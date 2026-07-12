@@ -10,8 +10,8 @@ final class RecordingManager {
         let filename = "recording-\(Int(Date().timeIntervalSince1970)).m4a"
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(filename)
 
-        // Mono a bitrate bajo: suficiente para voz y mantiene chico el archivo
-        // incluso en grabaciones largas.
+        // Mono at a low bitrate: enough for voice and keeps the file small
+        // even for long recordings.
         let settings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVSampleRateKey: 22050,
@@ -21,7 +21,7 @@ final class RecordingManager {
 
         let recorder = try AVAudioRecorder(url: url, settings: settings)
         guard recorder.record() else {
-            throw AppError.recordingFailed("el micrófono no empezó a grabar.")
+            throw AppError.recordingFailed("the microphone didn't start recording.")
         }
         self.recorder = recorder
     }

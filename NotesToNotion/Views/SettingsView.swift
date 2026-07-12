@@ -11,17 +11,17 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section {
-                SecureField("API key de Gemini", text: $geminiKey)
-                SecureField("Token de integración de Notion", text: $notionToken)
-                TextField("ID de la base de datos de Notion", text: $databaseID)
+                SecureField("Gemini API Key", text: $geminiKey)
+                SecureField("Notion Integration Token", text: $notionToken)
+                TextField("Notion Database ID", text: $databaseID)
             } footer: {
-                Text("Crea una integración interna en notion.so/my-integrations, comparte tu base \"Notas de voz\" con ella (••• → Connections) y copia el ID de 32 caracteres de la URL de la base.")
+                Text("Create an internal integration at notion.so/my-integrations, share your \"Voice Notes\" database with it (••• → Connections), and copy the 32-character ID from the database's URL.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             HStack {
-                Button("Guardar") {
+                Button("Save") {
                     KeychainStore.save(.geminiAPIKey, value: geminiKey)
                     KeychainStore.save(.notionToken, value: notionToken)
                     KeychainStore.save(.notionDatabaseID, value: databaseID)
@@ -31,7 +31,7 @@ struct SettingsView: View {
                 .keyboardShortcut(.defaultAction)
 
                 if saved {
-                    Text("Guardado ✓")
+                    Text("Saved ✓")
                         .foregroundStyle(.green)
                 }
             }

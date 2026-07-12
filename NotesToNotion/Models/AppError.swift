@@ -13,21 +13,21 @@ enum AppError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingCredentials:
-            "Faltan credenciales. Abre Configuración y agrega tu API key de Gemini, el token de Notion y el ID de la base de datos."
+            "Missing credentials. Open Settings and add your Gemini API key, Notion token, and database ID."
         case .microphonePermissionDenied:
-            "Acceso al micrófono denegado. Actívalo en Ajustes del Sistema → Privacidad y seguridad → Micrófono."
+            "Microphone access denied. Enable it in System Settings → Privacy & Security → Microphone."
         case .recordingFailed(let detail):
-            "Falló la grabación: \(detail)"
+            "Recording failed: \(detail)"
         case .geminiRequestFailed(let detail):
-            "Gemini falló: \(detail)"
+            "Gemini failed: \(detail)"
         case .geminiMalformedResponse:
-            "Gemini devolvió una respuesta que no se pudo interpretar."
+            "Gemini returned a response that couldn't be parsed."
         case .notionDatabaseNotShared:
-            "Notion no encontró la base de datos. Verifica el ID y que la base esté compartida con tu integración (••• → Connections)."
+            "Notion couldn't find the database. Check the ID and make sure the database is shared with your integration (••• → Connections)."
         case .notionUnauthorized:
-            "El token de Notion es inválido o fue revocado. Revísalo en Configuración."
+            "The Notion token is invalid or was revoked. Check it in Settings."
         case .notionRequestFailed(let detail):
-            "Notion rechazó la solicitud: \(detail)"
+            "Notion rejected the request: \(detail)"
         }
     }
 }

@@ -189,7 +189,7 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSUIElement = YES;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "NotesToNotion graba tus notas de voz para transcribirlas y guardarlas en Notion.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "NotesToNotion records your voice notes to transcribe and save them to Notion.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
@@ -213,7 +213,7 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSUIElement = YES;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "NotesToNotion graba tus notas de voz para transcribirlas y guardarlas en Notion.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "NotesToNotion records your voice notes to transcribe and save them to Notion.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",

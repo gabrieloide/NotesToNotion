@@ -10,38 +10,38 @@ struct MenuBarView: View {
             switch appState.phase {
             case .idle:
                 if appState.hasCredentials {
-                    Button("Empezar a grabar") { appState.startRecording() }
+                    Button("Start Recording") { appState.startRecording() }
                 } else {
-                    Text("Configura tus API keys para empezar")
+                    Text("Set up your API keys to get started")
                 }
 
             case .recording:
-                Text("Grabando… \(appState.formattedElapsed)")
-                Button("Detener y guardar") { appState.stopAndProcess() }
+                Text("Recording… \(appState.formattedElapsed)")
+                Button("Stop & Save") { appState.stopAndProcess() }
 
             case .processing(let status):
                 Text(status)
 
             case .success(let pageURL):
-                Text("Guardado en Notion ✓")
+                Text("Saved to Notion ✓")
                 if let pageURL {
-                    Button("Abrir en Notion") { NSWorkspace.shared.open(pageURL) }
+                    Button("Open in Notion") { NSWorkspace.shared.open(pageURL) }
                 }
-                Button("Nueva grabación") { appState.startRecording() }
-                Button("Listo") { appState.reset() }
+                Button("New Recording") { appState.startRecording() }
+                Button("Done") { appState.reset() }
 
             case .error(let message):
                 Text(message)
-                Button("Entendido") { appState.reset() }
+                Button("Got It") { appState.reset() }
             }
         }
 
         Divider()
 
-        Button("Configuración…") {
+        Button("Settings…") {
             NSApp.activate(ignoringOtherApps: true)
             openSettings()
         }
-        Button("Salir") { NSApplication.shared.terminate(nil) }
+        Button("Quit") { NSApplication.shared.terminate(nil) }
     }
 }

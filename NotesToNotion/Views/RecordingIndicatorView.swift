@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Contenido de la píldora flotante que aparece arriba a la derecha
-/// mientras se graba o se procesa una nota.
+/// Content of the floating pill that appears in the top-right corner
+/// while recording or processing a note.
 struct RecordingIndicatorView: View {
     @Environment(AppState.self) private var appState
 
@@ -15,7 +15,7 @@ struct RecordingIndicatorView: View {
                 Text(appState.formattedElapsed)
                     .font(.system(size: 13, weight: .medium))
                     .monospacedDigit()
-                Button("Detener") { appState.stopAndProcess() }
+                Button("Stop") { appState.stopAndProcess() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .tint(.red)
@@ -29,7 +29,7 @@ struct RecordingIndicatorView: View {
                     .lineLimit(1)
 
             default:
-                // El controller oculta el panel en cualquier otro estado.
+                // The controller hides the panel in every other state.
                 EmptyView()
             }
         }

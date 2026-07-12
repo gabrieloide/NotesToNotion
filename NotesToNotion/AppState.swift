@@ -20,7 +20,7 @@ final class AppState {
     private let recorder = RecordingManager()
     private var timer: Timer?
 
-    // Tope de seguridad para grabaciones olvidadas.
+    // Safety cap for recordings left running by accident.
     private static let maxRecordingSeconds = 60 * 60
 
     init() {
@@ -70,7 +70,7 @@ final class AppState {
         timer?.invalidate()
         timer = nil
         guard let audioURL = recorder.stop() else {
-            phase = .error("No se pudo guardar el audio de la grabación.")
+            phase = .error("Couldn't save the recorded audio.")
             return
         }
         Task { await process(audioURL: audioURL) }
@@ -97,11 +97,11 @@ final class AppState {
                 throw AppError.missingCredentials
             }
 
-            phase = .processing("Transcribiendo con Gemini…")
+            phase = .processing("Transcribing with Gemini…")
             let gemini = GeminiClient(apiKey: geminiKey)
             let result = try await gemini.transcribeAndSummarize(audioFile: audioURL)
 
-            phase = .processing("Guardando en Notion…")
+            phase = .processing("Saving to Notion…")
             let notion = NotionClient(token: notionToken, databaseID: databaseID)
             let pageURL = try await notion.createVoiceNote(
                 summary: result.summary,
@@ -125,6 +125,6 @@ final class AppState {
         if let appError = error as? AppError {
             return appError.localizedDescription
         }
-        return "Algo salió mal: \(error.localizedDescription)"
+        return "Something went wrong: \(error.localizedDescription)"
     }
 }

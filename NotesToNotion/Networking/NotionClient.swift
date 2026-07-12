@@ -7,7 +7,7 @@ struct NotionClient {
     private static let baseURL = "https://api.notion.com/v1"
     private static let apiVersion = "2022-06-28"
 
-    // Notion limita cada rich_text a 2000 caracteres y cada request a 100 bloques.
+    // Notion limits each rich_text to 2000 characters and each request to 100 blocks.
     private static let maxBlockTextLength = 1900
     private static let maxBlocksPerRequest = 90
 
@@ -16,16 +16,16 @@ struct NotionClient {
 
         let formatter = DateFormatter()
         formatter.dateFormat = "dd/MM/yyyy HH:mm"
-        let title = "Nota de voz — \(formatter.string(from: Date()))"
+        let title = "Voice Note — \(formatter.string(from: Date()))"
 
-        var children: [[String: Any]] = [Self.heading("Resumen")]
+        var children: [[String: Any]] = [Self.heading("Summary")]
         children += Self.chunkedParagraphs(summary)
         if !keyPoints.isEmpty {
-            children.append(Self.heading("Puntos clave"))
+            children.append(Self.heading("Key Points"))
             children += keyPoints.map(Self.bulletedListItem)
         }
         children.append(["object": "block", "type": "divider", "divider": [String: String]()])
-        children.append(Self.heading("Transcripción"))
+        children.append(Self.heading("Transcript"))
         children += Self.chunkedParagraphs(transcript)
 
         let firstBatch = Array(children.prefix(Self.maxBlocksPerRequest))
@@ -44,10 +44,10 @@ struct NotionClient {
         let (body, _) = try await send("POST", path: "/pages", json: pageBody)
         guard let page = try JSONSerialization.jsonObject(with: body) as? [String: Any],
               let pageID = page["id"] as? String else {
-            throw AppError.notionRequestFailed("respuesta inesperada al crear la página.")
+            throw AppError.notionRequestFailed("unexpected response while creating the page.")
         }
 
-        // Transcripciones muy largas: agregar el resto en tandas.
+        // Very long transcripts: append the rest in batches.
         var pending = remaining
         while !pending.isEmpty {
             let batch = Array(pending.prefix(Self.maxBlocksPerRequest))
@@ -58,14 +58,14 @@ struct NotionClient {
         return (page["url"] as? String).flatMap(URL.init(string:))
     }
 
-    /// Descubre el nombre real de la propiedad título de la base de datos
-    /// (puede no llamarse "Name" si el usuario la renombró).
+    /// Discovers the database's actual title property name (it may not be
+    /// called "Name" if the user renamed it).
     private func titlePropertyName() async throws -> String {
         let (body, _) = try await send("GET", path: "/databases/\(databaseID)", json: nil)
         guard let database = try JSONSerialization.jsonObject(with: body) as? [String: Any],
               let properties = database["properties"] as? [String: [String: Any]],
               let titleEntry = properties.first(where: { ($0.value["type"] as? String) == "title" }) else {
-            throw AppError.notionRequestFailed("la base de datos no tiene una propiedad de título.")
+            throw AppError.notionRequestFailed("the database has no title property.")
         }
         return titleEntry.key
     }
@@ -84,7 +84,7 @@ struct NotionClient {
 
         let (body, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else {
-            throw AppError.notionRequestFailed("respuesta inválida del servidor.")
+            throw AppError.notionRequestFailed("invalid response from the server.")
         }
         switch http.statusCode {
         case 200, 201:
@@ -123,8 +123,8 @@ struct NotionClient {
         ]
     }
 
-    /// Trocea texto largo en párrafos de menos de 2000 caracteres (límite de
-    /// Notion por rich_text), cortando de preferencia en fin de oración.
+    /// Splits long text into paragraphs under 2000 characters (Notion's
+    /// rich_text limit), preferring to cut at sentence boundaries.
     private static func chunkedParagraphs(_ text: String) -> [[String: Any]] {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [paragraph("—")] }

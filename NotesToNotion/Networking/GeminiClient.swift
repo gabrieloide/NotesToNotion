@@ -4,9 +4,9 @@ struct GeminiClient {
     let apiKey: String
 
     private static let baseURL = "https://generativelanguage.googleapis.com"
-    // Pro en vez de flash: más preciso con audio bilingüe/complejo (clases con
-    // cambio de idioma japonés/inglés), a cambio de ser más lento — aceptable
-    // para el volumen de uso (1-2 clases de 1h por semana).
+    // Pro instead of flash: more accurate with bilingual/complex audio
+    // (classes with Japanese/English code-switching), at the cost of being
+    // slower — acceptable given the usage volume (1-2 one-hour classes/week).
     private static let model = "gemini-pro-latest"
     private static let audioMIMEType = "audio/mp4"
 
@@ -31,7 +31,7 @@ struct GeminiClient {
     private func uploadAudio(_ audioFile: URL) async throws -> GeminiFile {
         let audioData = try Data(contentsOf: audioFile)
 
-        // Paso 1: iniciar la sesión de subida resumable.
+        // Step 1: start the resumable upload session.
         var startRequest = URLRequest(url: URL(string: "\(Self.baseURL)/upload/v1beta/files")!)
         startRequest.httpMethod = "POST"
         startRequest.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
@@ -51,7 +51,7 @@ struct GeminiClient {
             throw AppError.geminiRequestFailed(Self.describeFailure(startResponse, startBody))
         }
 
-        // Paso 2: subir los bytes y finalizar en una sola llamada.
+        // Step 2: upload the bytes and finalize in a single call.
         var uploadRequest = URLRequest(url: uploadURL)
         uploadRequest.httpMethod = "POST"
         uploadRequest.setValue("upload, finalize", forHTTPHeaderField: "X-Goog-Upload-Command")
@@ -70,7 +70,7 @@ struct GeminiClient {
         while current.state == "PROCESSING" {
             attempts += 1
             guard attempts <= 60 else {
-                throw AppError.geminiRequestFailed("el archivo de audio tardó demasiado en procesarse.")
+                throw AppError.geminiRequestFailed("the audio file took too long to process.")
             }
             try await Task.sleep(nanoseconds: 2_000_000_000)
 
@@ -83,7 +83,7 @@ struct GeminiClient {
             current = try JSONDecoder().decode(GeminiFile.self, from: body)
         }
         guard current.state == "ACTIVE" else {
-            throw AppError.geminiRequestFailed("Gemini no pudo procesar el audio (estado: \(current.state)).")
+            throw AppError.geminiRequestFailed("Gemini couldn't process the audio (state: \(current.state)).")
         }
         return current
     }
@@ -91,12 +91,12 @@ struct GeminiClient {
     // MARK: - generateContent
 
     private static let prompt = """
-    El audio es de una clase online que puede alternar entre japonés e inglés en cualquier momento (code-switching), incluso dentro de la misma oración. Presta especial atención a los cambios de idioma: no asumas un solo idioma dominante ni fuerces todo el audio a uno solo.
+    The audio is from an online class that may switch between Japanese and English at any point (code-switching), even within the same sentence. Pay close attention to language switches: don't assume a single dominant language or force the whole audio into one.
 
-    Devuelve un JSON con exactamente tres campos:
-    - "transcript": la transcripción fiel y completa de todo lo que se dice, cada palabra en el idioma exacto en que se pronunció (japonés en japonés, inglés en inglés, tal como ocurra el cambio). No traduzcas nada. Limpia solo muletillas obvias (eh, em, あの, えっと) manteniendo el contenido íntegro. Si se menciona vocabulario o gramática japonesa, escribe el japonés con su escritura nativa (kanji/kana), no en rōmaji.
-    - "summary": un resumen conciso (1 a 3 oraciones) de los puntos principales de la clase, en español.
-    - "keyPoints": una lista de 3 a 7 frases breves y concretas con los puntos clave de la clase (vocabulario nuevo, gramática, correcciones, temas tratados), en español. Cada elemento debe ser una frase corta, no una oración larga.
+    Return a JSON object with exactly three fields:
+    - "transcript": a faithful, complete transcript of everything said, with each word in the exact language it was spoken in (Japanese in Japanese, English in English, following the switches as they happen). Do not translate anything. Only clean up obvious filler sounds (uh, um, あの, えっと) while keeping the content intact. When Japanese vocabulary or grammar is mentioned, write it in its native script (kanji/kana), not romaji.
+    - "summary": a concise summary (1 to 3 sentences) of the class's main points, in English.
+    - "keyPoints": a list of 3 to 7 short, concrete phrases covering the class's key points (new vocabulary, grammar, corrections, topics covered), in English. Each item should be a short phrase, not a long sentence.
     """
 
     private func generateContent(fileURI: String) async throws -> GeminiResult {
@@ -126,7 +126,7 @@ struct GeminiClient {
         let url = URL(string: "\(Self.baseURL)/v1beta/models/\(Self.model):generateContent")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        // Pro es más lento que flash y las clases pueden durar hasta 1h de audio.
+        // Pro is slower than flash and classes can run up to 1h of audio.
         request.timeoutInterval = 900
         request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -163,9 +163,9 @@ struct GeminiClient {
         if let result = try? JSONDecoder().decode(GeminiResult.self, from: Data(cleaned.utf8)) {
             return result
         }
-        // Último recurso: conservar el texto crudo como transcripción para no
-        // perder la nota aunque el resumen falle.
-        return GeminiResult(transcript: cleaned, summary: "(No se pudo generar el resumen)", keyPoints: [])
+        // Last resort: keep the raw text as the transcript so the note
+        // isn't lost even if the summary fails.
+        return GeminiResult(transcript: cleaned, summary: "(Summary generation failed)", keyPoints: [])
     }
 
     private static func stripCodeFences(from text: String) -> String {

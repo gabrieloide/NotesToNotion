@@ -2,8 +2,8 @@ import AppKit
 import Observation
 import SwiftUI
 
-/// Muestra/oculta el panel flotante de grabación observando `AppState.phase`
-/// directamente, sin depender de ninguna vista SwiftUI viva.
+/// Shows/hides the floating recording panel by observing `AppState.phase`
+/// directly, without depending on any SwiftUI view staying alive.
 @MainActor
 final class RecordingIndicatorController {
     private var panel: NSPanel?
@@ -70,14 +70,14 @@ final class RecordingIndicatorController {
         panel.isReleasedWhenClosed = false
 
         let hostingView = NSHostingView(rootView: RecordingIndicatorView().environment(appState))
-        // La vista SwiftUI dicta el tamaño del panel (cambia entre grabando y procesando).
+        // The SwiftUI view dictates the panel's size (it changes between recording and processing).
         hostingView.sizingOptions = .preferredContentSize
         panel.contentView = hostingView
         return panel
     }
 
-    /// Esquina superior derecha, justo debajo de la barra de menú. Se recalcula
-    /// en cada aparición por si cambió la configuración de pantallas.
+    /// Top-right corner, just below the menu bar. Recomputed every time it's
+    /// shown in case the display configuration changed.
     private func position(_ panel: NSPanel) {
         guard let screenFrame = NSScreen.main?.visibleFrame else { return }
         let size = panel.frame.size
