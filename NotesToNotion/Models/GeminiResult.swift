@@ -1,6 +1,6 @@
 import Foundation
 
-struct GeminiResult: Decodable {
+struct GeminiResult: Codable {
     let transcript: String
     let summary: String
     let keyPoints: [String]

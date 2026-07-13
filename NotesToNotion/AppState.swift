@@ -16,6 +16,10 @@ final class AppState {
     var phase: Phase = .idle
     var elapsedSeconds = 0
     var hasCredentials: Bool
+    /// A Gemini result that made it through transcription but hasn't been
+    /// confirmed saved to Notion yet — either from this session's last
+    /// failure, or recovered from disk after the app quit mid-flow.
+    var pendingNote: PendingNote?
 
     private let recorder = RecordingManager()
     private var timer: Timer?
@@ -25,6 +29,10 @@ final class AppState {
 
     init() {
         hasCredentials = Self.credentialsPresent()
+        if let recovered = PendingNoteStore.loadOldest() {
+            pendingNote = recovered
+            phase = .error("Found a note from a previous session that wasn't saved to Notion yet.")
+        }
     }
 
     var menuBarIcon: String {
@@ -91,9 +99,7 @@ final class AppState {
     private func process(audioURL: URL) async {
         defer { try? FileManager.default.removeItem(at: audioURL) }
         do {
-            guard let geminiKey = KeychainStore.read(.geminiAPIKey),
-                  let notionToken = KeychainStore.read(.notionToken),
-                  let databaseID = KeychainStore.read(.notionDatabaseID) else {
+            guard let geminiKey = KeychainStore.read(.geminiAPIKey) else {
                 throw AppError.missingCredentials
             }
 
@@ -101,18 +107,54 @@ final class AppState {
             let gemini = GeminiClient(apiKey: geminiKey)
             let result = try await gemini.transcribeAndSummarize(audioFile: audioURL)
 
-            phase = .processing("Saving to Notion…")
-            let notion = NotionClient(token: notionToken, databaseID: databaseID)
-            let pageURL = try await notion.createVoiceNote(
-                summary: result.summary,
-                keyPoints: result.keyPoints,
-                transcript: result.transcript
-            )
+            // Persist before attempting Notion: if that call fails, the
+            // transcript survives on disk instead of being lost with this
+            // in-memory value.
+            let note = PendingNote(id: UUID(), createdAt: Date(), result: result)
+            PendingNoteStore.save(note)
+            pendingNote = note
 
-            phase = .success(pageURL)
+            try await saveToNotion(note)
         } catch {
             phase = .error(Self.message(for: error))
         }
+    }
+
+    func retryNotionSave() {
+        guard let note = pendingNote else { return }
+        Task {
+            do {
+                try await saveToNotion(note)
+            } catch {
+                phase = .error(Self.message(for: error))
+            }
+        }
+    }
+
+    func discardPendingNote() {
+        guard let note = pendingNote else { return }
+        PendingNoteStore.delete(id: note.id)
+        pendingNote = nil
+        phase = .idle
+    }
+
+    private func saveToNotion(_ note: PendingNote) async throws {
+        guard let notionToken = KeychainStore.read(.notionToken),
+              let databaseID = KeychainStore.read(.notionDatabaseID) else {
+            throw AppError.missingCredentials
+        }
+
+        phase = .processing("Saving to Notion…")
+        let notion = NotionClient(token: notionToken, databaseID: databaseID)
+        let pageURL = try await notion.createVoiceNote(
+            summary: note.result.summary,
+            keyPoints: note.result.keyPoints,
+            transcript: note.result.transcript
+        )
+
+        PendingNoteStore.delete(id: note.id)
+        pendingNote = nil
+        phase = .success(pageURL)
     }
 
     private static func credentialsPresent() -> Bool {

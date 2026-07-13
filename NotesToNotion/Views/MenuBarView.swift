@@ -32,7 +32,12 @@ struct MenuBarView: View {
 
             case .error(let message):
                 Text(message)
-                Button("Got It") { appState.reset() }
+                if appState.pendingNote != nil {
+                    Button("Retry Saving to Notion") { appState.retryNotionSave() }
+                    Button("Discard Note") { appState.discardPendingNote() }
+                } else {
+                    Button("Got It") { appState.reset() }
+                }
             }
         }
 
