@@ -77,11 +77,13 @@ final class AppState {
     func stopAndProcess() {
         timer?.invalidate()
         timer = nil
-        guard let audioURL = recorder.stop() else {
-            phase = .error("Couldn't save the recorded audio.")
-            return
+        Task {
+            guard let audioURL = await recorder.stop() else {
+                phase = .error("Couldn't save the recorded audio.")
+                return
+            }
+            await process(audioURL: audioURL)
         }
-        Task { await process(audioURL: audioURL) }
     }
 
     private func startTimer() {
@@ -103,14 +105,35 @@ final class AppState {
                 throw AppError.missingCredentials
             }
 
-            phase = .processing("Transcribing with Gemini…")
-            let gemini = GeminiClient(apiKey: geminiKey)
-            let result = try await gemini.transcribeAndSummarize(audioFile: audioURL)
+            phase = .processing("Transcribing with Whisper…")
+            let transcript = try await WhisperTranscriber.shared.transcribe(audioURL: audioURL)
+            let trimmedTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedTranscript.isEmpty else {
+                throw AppError.noSpeechDetected
+            }
 
-            // Persist before attempting Notion: if that call fails, the
-            // transcript survives on disk instead of being lost with this
-            // in-memory value.
-            let note = PendingNote(id: UUID(), createdAt: Date(), result: result)
+            // Persist the transcript right away so if Gemini or Notion fails,
+            // the transcript isn't lost.
+            var note = PendingNote(
+                id: UUID(),
+                createdAt: Date(),
+                result: GeminiResult(transcript: trimmedTranscript, summary: "", keyPoints: [], title: nil, notes: nil)
+            )
+            PendingNoteStore.save(note)
+            pendingNote = note
+
+            phase = .processing("Generating study notes with Gemini…")
+            let gemini = GeminiClient(apiKey: geminiKey)
+            let (title, overview, notes) = try await gemini.summarize(transcript: trimmedTranscript)
+
+            let fullResult = GeminiResult(
+                transcript: trimmedTranscript,
+                summary: overview,
+                keyPoints: [],
+                title: title,
+                notes: notes
+            )
+            note = PendingNote(id: note.id, createdAt: note.createdAt, result: fullResult)
             PendingNoteStore.save(note)
             pendingNote = note
 
@@ -120,11 +143,60 @@ final class AppState {
         }
     }
 
-    func retryNotionSave() {
+    func retryPendingNote() {
         guard let note = pendingNote else { return }
         Task {
             do {
-                try await saveToNotion(note)
+                guard let geminiKey = KeychainStore.read(.geminiAPIKey) else {
+                    throw AppError.missingCredentials
+                }
+
+                var updatedNote = note
+                if updatedNote.result.notes == nil || updatedNote.result.notes?.isEmpty == true {
+                    phase = .processing("Generating study notes with Gemini…")
+                    let gemini = GeminiClient(apiKey: geminiKey)
+                    let (title, overview, notes) = try await gemini.summarize(transcript: updatedNote.result.transcript)
+                    let fullResult = GeminiResult(
+                        transcript: updatedNote.result.transcript,
+                        summary: overview,
+                        keyPoints: updatedNote.result.keyPoints,
+                        title: title,
+                        notes: notes
+                    )
+                    updatedNote = PendingNote(id: note.id, createdAt: note.createdAt, result: fullResult)
+                    PendingNoteStore.save(updatedNote)
+                    pendingNote = updatedNote
+                }
+
+                try await saveToNotion(updatedNote)
+            } catch {
+                phase = .error(Self.message(for: error))
+            }
+        }
+    }
+
+    func saveRawTranscript() {
+        guard let note = pendingNote else { return }
+        Task {
+            do {
+                guard let notionToken = KeychainStore.read(.notionToken),
+                      let databaseID = KeychainStore.read(.notionDatabaseID) else {
+                    throw AppError.missingCredentials
+                }
+
+                phase = .processing("Saving transcript to Notion…")
+                let notion = NotionClient(token: notionToken, databaseID: databaseID)
+                let pageURL = try await notion.createVoiceNote(
+                    title: "Voice Note",
+                    overview: "Voice note transcript (saved without Gemini notes).",
+                    notesMarkdown: nil,
+                    keyPoints: [],
+                    transcript: note.result.transcript
+                )
+
+                PendingNoteStore.delete(id: note.id)
+                pendingNote = nil
+                phase = .success(pageURL)
             } catch {
                 phase = .error(Self.message(for: error))
             }
@@ -147,7 +219,9 @@ final class AppState {
         phase = .processing("Saving to Notion…")
         let notion = NotionClient(token: notionToken, databaseID: databaseID)
         let pageURL = try await notion.createVoiceNote(
-            summary: note.result.summary,
+            title: note.result.title,
+            overview: note.result.summary.isEmpty ? "Voice Note" : note.result.summary,
+            notesMarkdown: note.result.notes,
             keyPoints: note.result.keyPoints,
             transcript: note.result.transcript
         )
