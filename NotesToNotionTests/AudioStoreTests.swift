@@ -6,8 +6,14 @@ final class AudioStoreTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        // Resolved up front: /var/folders/... vs /private/var/folders/...
+        // is the same directory (symlink) but compares unequal as a plain
+        // URL, and FileManager.contentsOfDirectory can hand back either
+        // form depending on the OS/runner — seen failing on GitHub's
+        // macOS runner while passing locally.
         scratchDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("AudioStoreTests-\(UUID().uuidString)", isDirectory: true)
+            .resolvingSymlinksInPath()
         AudioStore.baseDirectory = scratchDir
     }
 

@@ -6,8 +6,10 @@ final class PendingNoteStoreTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        // See AudioStoreTests for why this needs resolvingSymlinksInPath().
         scratchDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("PendingNoteStoreTests-\(UUID().uuidString)", isDirectory: true)
+            .resolvingSymlinksInPath()
         PendingNoteStore.baseDirectory = scratchDir
     }
 
