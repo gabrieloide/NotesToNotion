@@ -6,14 +6,8 @@ final class AudioStoreTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        // Resolved up front: /var/folders/... vs /private/var/folders/...
-        // is the same directory (symlink) but compares unequal as a plain
-        // URL, and FileManager.contentsOfDirectory can hand back either
-        // form depending on the OS/runner — seen failing on GitHub's
-        // macOS runner while passing locally.
         scratchDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("AudioStoreTests-\(UUID().uuidString)", isDirectory: true)
-            .resolvingSymlinksInPath()
         AudioStore.baseDirectory = scratchDir
     }
 
@@ -27,10 +21,30 @@ final class AudioStoreTests: XCTestCase {
         scratchDir.appendingPathComponent("NotesToNotion/PendingAudio", isDirectory: true)
     }
 
+    /// Two URLs can point at the identical file yet compare unequal as
+    /// plain paths — macOS's FileManager.contentsOfDirectory hands back
+    /// /private/var/folders/... while a path built from
+    /// FileManager.default.temporaryDirectory stays /var/folders/...
+    /// (the same directory; resolvingSymlinksInPath deliberately leaves
+    /// /var and /tmp alone). Comparing by file identity sidesteps the
+    /// spelling entirely and is what these tests actually care about.
+    private func assertSameFile(_ lhs: URL?, _ rhs: URL?, file: StaticString = #filePath, line: UInt = #line) {
+        guard let lhs, let rhs else {
+            XCTFail("expected two URLs, got \(String(describing: lhs)) and \(String(describing: rhs))", file: file, line: line)
+            return
+        }
+        let lhsID = try? lhs.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier
+        let rhsID = try? rhs.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier
+        XCTAssertNotNil(lhsID, "couldn't read file identity for \(lhs)", file: file, line: line)
+        XCTAssertEqual(lhsID as? NSObject, rhsID as? NSObject, "\(lhs) and \(rhs) are not the same file", file: file, line: line)
+    }
+
     func testNewRecordingURLPointsInsideDurableDirectory() {
         let url = AudioStore.newRecordingURL(name: "mic-123.m4a")
 
-        XCTAssertEqual(url, pendingAudioDir().appendingPathComponent("mic-123.m4a"))
+        XCTAssertEqual(url.lastPathComponent, "mic-123.m4a")
+        XCTAssertEqual(url.deletingLastPathComponent().lastPathComponent, "PendingAudio")
+        assertSameFile(url.deletingLastPathComponent(), pendingAudioDir())
     }
 
     func testNewRecordingURLCreatesTheDirectoryEagerly() {
@@ -70,7 +84,7 @@ final class AudioStoreTests: XCTestCase {
         try Data("newer".utf8).write(to: newer)
         try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 200)], ofItemAtPath: newer.path)
 
-        XCTAssertEqual(AudioStore.loadOldest(), older)
+        assertSameFile(AudioStore.loadOldest(), older)
     }
 
     /// A crash mid-recording (before RecordingManager.stop() merges the
@@ -91,6 +105,6 @@ final class AudioStoreTests: XCTestCase {
         let orphanedSystemTrack = AudioStore.newRecordingURL(name: "system-100.caf")
         try Data("system audio only".utf8).write(to: orphanedSystemTrack)
 
-        XCTAssertEqual(AudioStore.loadOldest(), mic)
+        assertSameFile(AudioStore.loadOldest(), mic)
     }
 }
