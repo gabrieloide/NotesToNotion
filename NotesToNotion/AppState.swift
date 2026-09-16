@@ -20,6 +20,11 @@ final class AppState {
     /// confirmed saved to Notion yet — either from this session's last
     /// failure, or recovered from disk after the app quit mid-flow.
     var pendingNote: PendingNote?
+    /// A recording that hasn't made it to a transcript yet — either this
+    /// session's last transcription failure, or recovered from disk after
+    /// the app quit mid-transcription. Never deleted until its transcript
+    /// is durably saved, so a WhisperKit failure can't lose the class.
+    var pendingAudioURL: URL?
 
     private let recorder = RecordingManager()
     private var timer: Timer?
@@ -32,6 +37,9 @@ final class AppState {
         if let recovered = PendingNoteStore.loadOldest() {
             pendingNote = recovered
             phase = .error("Found a note from a previous session that wasn't saved to Notion yet.")
+        } else if let recoveredAudio = AudioStore.loadOldest() {
+            pendingAudioURL = recoveredAudio
+            phase = .error("Found a recording from a previous session that wasn't transcribed yet.")
         }
     }
 
@@ -99,7 +107,33 @@ final class AppState {
     }
 
     private func process(audioURL: URL) async {
-        defer { try? FileManager.default.removeItem(at: audioURL) }
+        // RecordingManager already wrote this file directly into AudioStore's
+        // durable location (see AudioStore.newRecordingURL), so it's safe
+        // from a temp-dir sweep or a crash from the moment recording
+        // started. It's only deleted once the transcript is durably
+        // persisted below.
+        pendingAudioURL = audioURL
+        await transcribeAndSummarize(audioURL: audioURL)
+    }
+
+    /// Called when the app is quitting while a recording is in progress:
+    /// finalizes the audio (stops the recorder, merges mic+system tracks)
+    /// without starting transcription, so the class is safely on disk for
+    /// recovery next launch instead of being silently dropped along with
+    /// the terminated process.
+    func finalizeRecordingForQuit() async {
+        guard phase == .recording else { return }
+        timer?.invalidate()
+        timer = nil
+        guard let audioURL = await recorder.stop() else { return }
+        pendingAudioURL = audioURL
+    }
+
+    /// Runs Whisper transcription (if needed) followed by Gemini
+    /// summarization and the Notion save. Shared by a fresh recording and
+    /// by `retryTranscription()` for audio recovered from a previous
+    /// failure.
+    private func transcribeAndSummarize(audioURL: URL) async {
         do {
             guard let geminiKey = KeychainStore.read(.geminiAPIKey) else {
                 throw AppError.missingCredentials
@@ -112,8 +146,9 @@ final class AppState {
                 throw AppError.noSpeechDetected
             }
 
-            // Persist the transcript right away so if Gemini or Notion fails,
-            // the transcript isn't lost.
+            // The transcript is now durably saved on its own — the raw
+            // audio is no longer the only copy of the class, so it's safe
+            // to delete.
             var note = PendingNote(
                 id: UUID(),
                 createdAt: Date(),
@@ -121,6 +156,8 @@ final class AppState {
             )
             PendingNoteStore.save(note)
             pendingNote = note
+            AudioStore.delete(audioURL)
+            pendingAudioURL = nil
 
             phase = .processing("Generating study notes with Gemini…")
             let gemini = GeminiClient(apiKey: geminiKey)
@@ -138,9 +175,33 @@ final class AppState {
             pendingNote = note
 
             try await saveToNotion(note)
+        } catch AppError.noSpeechDetected {
+            // Genuinely no usable audio either way — nothing left worth
+            // keeping around to retry.
+            AudioStore.delete(audioURL)
+            pendingAudioURL = nil
+            phase = .error(Self.message(for: AppError.noSpeechDetected))
         } catch {
+            // Deliberately NOT deleting the audio here: whatever failed
+            // (missing credentials, WhisperKit itself, a crash) happened
+            // before the transcript was durably saved, so pendingAudioURL
+            // keeps pointing at the recording for retryTranscription().
             phase = .error(Self.message(for: error))
         }
+    }
+
+    func retryTranscription() {
+        guard let audioURL = pendingAudioURL else { return }
+        Task {
+            await transcribeAndSummarize(audioURL: audioURL)
+        }
+    }
+
+    func discardPendingAudio() {
+        guard let audioURL = pendingAudioURL else { return }
+        AudioStore.delete(audioURL)
+        pendingAudioURL = nil
+        phase = .idle
     }
 
     func retryPendingNote() {

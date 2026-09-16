@@ -10,8 +10,7 @@ final class RecordingManager {
         try await ensureMicrophonePermission()
 
         let timestamp = Int(Date().timeIntervalSince1970)
-        let tempDir = FileManager.default.temporaryDirectory
-        let micURL = tempDir.appendingPathComponent("mic-\(timestamp).m4a")
+        let micURL = AudioStore.newRecordingURL(name: "mic-\(timestamp).m4a")
 
         // Mono at a low bitrate: enough for voice and keeps the file small
         // even for long recordings.
@@ -31,7 +30,7 @@ final class RecordingManager {
         // System audio (the other side of a video call) is best-effort: a
         // denied Screen Recording permission shouldn't block recording, it
         // just means the note ends up mic-only.
-        let systemURL = tempDir.appendingPathComponent("system-\(timestamp).caf")
+        let systemURL = AudioStore.newRecordingURL(name: "system-\(timestamp).caf")
         let systemRecorder = SystemAudioRecorder(fileURL: systemURL)
         do {
             try await systemRecorder.start()
@@ -72,8 +71,7 @@ final class RecordingManager {
         }
         print("DEBUG stop(): system file size = \(fileSize(systemAudioURL)) bytes at \(systemAudioURL.path)")
 
-        let mixedURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("mixed-\(Int(Date().timeIntervalSince1970)).m4a")
+        let mixedURL = AudioStore.newRecordingURL(name: "mixed-\(Int(Date().timeIntervalSince1970)).m4a")
         do {
             try AudioMixer.mix(micURL: micURL, systemURL: systemAudioURL, outputURL: mixedURL)
             print("DEBUG stop(): mixed file size = \(fileSize(mixedURL)) bytes at \(mixedURL.path)")

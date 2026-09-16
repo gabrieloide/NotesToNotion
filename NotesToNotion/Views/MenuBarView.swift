@@ -36,6 +36,9 @@ struct MenuBarView: View {
                     Button("Retry") { appState.retryPendingNote() }
                     Button("Save Transcript Only") { appState.saveRawTranscript() }
                     Button("Discard Note") { appState.discardPendingNote() }
+                } else if appState.pendingAudioURL != nil {
+                    Button("Retry Transcription") { appState.retryTranscription() }
+                    Button("Discard Recording") { appState.discardPendingAudio() }
                 } else {
                     Button("Got It") { appState.reset() }
                 }

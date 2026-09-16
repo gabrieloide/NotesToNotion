@@ -4,6 +4,7 @@ import SwiftUI
 struct NotesToNotionApp: App {
     @State private var appState = AppState()
     @State private var indicatorController = RecordingIndicatorController()
+    @NSApplicationDelegateAdaptor private var appDelegate: AppDelegate
 
     init() {
         // Unbuffered stdout so debug prints show up immediately when run
@@ -17,7 +18,10 @@ struct NotesToNotionApp: App {
                 .environment(appState)
         } label: {
             Image(systemName: appState.menuBarIcon)
-                .task { indicatorController.start(with: appState) }
+                .task {
+                    indicatorController.start(with: appState)
+                    appDelegate.appState = appState
+                }
         }
 
         Settings {
