@@ -3,9 +3,14 @@ import Foundation
 /// Durable local buffer for notes that made it through Gemini but not yet
 /// through Notion. One JSON file per pending note in Application Support.
 enum PendingNoteStore {
+    /// The parent of `NotesToNotion/PendingNotes`. Defaults to the real
+    /// Application Support directory; tests override this to a scratch
+    /// directory so they don't read or write the user's actual pending
+    /// notes.
+    static var baseDirectory: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+
     private static var directory: URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        let dir = base.appendingPathComponent("NotesToNotion/PendingNotes", isDirectory: true)
+        let dir = baseDirectory.appendingPathComponent("NotesToNotion/PendingNotes", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
