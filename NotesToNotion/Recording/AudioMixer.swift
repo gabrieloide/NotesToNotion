@@ -1,9 +1,7 @@
 import AVFoundation
 import Darwin
 
-/// Offline-mixes the microphone and system-audio recordings into a single
-/// m4a file, so Gemini receives one chronologically coherent track instead
-/// of two independent ones.
+/// Mezcla las grabaciones del micrófono y del audio del sistema en un archivo .m4a estéreo dual channel (Canal 0: Estudiante, Canal 1: Sensei) para que WhisperTranscriber realice la transcripción diarizada local.
 enum AudioMixer {
     private static let renderSampleRate = 44100.0
     private static let postMixGain: Float = 1.2
@@ -45,9 +43,9 @@ enum AudioMixer {
 
         micPlayer.pan = -1.0
         sysMonoMixer.pan = 1.0
-        micPlayer.volume = 1.0
+        micPlayer.volume = 1.8
         systemPlayer.volume = 1.0
-        sysMonoMixer.volume = 1.0
+        sysMonoMixer.volume = 1.2
 
         try engine.enableManualRenderingMode(.offline, format: renderFormat, maximumFrameCount: 4096)
         try engine.start()
@@ -82,10 +80,19 @@ enum AudioMixer {
         var framesRendered: AVAudioFrameCount = 0
         while framesRendered < totalFrames {
             let framesToRender = min(buffer.frameCapacity, totalFrames - framesRendered)
+
+            if let channelData = buffer.floatChannelData {
+                let channelCount = Int(buffer.format.channelCount)
+                let byteCount = Int(buffer.frameCapacity) * MemoryLayout<Float>.size
+                for channel in 0..<channelCount {
+                    memset(channelData[channel], 0, byteCount)
+                }
+            }
+
             let status = try engine.renderOffline(framesToRender, to: buffer)
             switch status {
             case .success:
-                applyGainAndSoftClip(gain, to: buffer)
+                applyGainAndSoftClip(postMixGain, to: buffer)
                 try outputFile.write(from: buffer)
                 framesRendered += framesToRender
             case .insufficientDataFromInputNode, .cannotDoInCurrentContext:
@@ -104,11 +111,15 @@ enum AudioMixer {
         guard let channelData = buffer.floatChannelData else { return }
         let frameLength = Int(buffer.frameLength)
         let channelCount = Int(buffer.format.channelCount)
+        let norm = tanhf(gain)
+        guard norm > 0 else { return }
+
         for channel in 0..<channelCount {
             let samples = channelData[channel]
             for i in 0..<frameLength {
                 let scaled = samples[i] * gain
-                samples[i] = max(-1.0, min(1.0, tanhf(scaled)))
+                let limited = tanhf(scaled) / norm
+                samples[i] = max(-1.0, min(1.0, limited))
             }
         }
     }

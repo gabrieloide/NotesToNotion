@@ -9,7 +9,7 @@ struct GeminiClient {
     // gemini-2.5-pro -> 429, 0 RPD/RPM quota on this project.
     // gemini-2.5-flash (pinned) -> 404, not available to new-tier accounts.
     // gemini-3.5-flash -> live-tested 2026-09-16, returns intermittent 503
-    // "high demand" — do not switch back without a fresh live test.
+    // "high demand": do not switch back without a fresh live test.
     private static let model = "gemini-flash-latest"
 
     // MARK: - Generate study notes from a transcript
@@ -19,13 +19,15 @@ struct GeminiClient {
     The transcript includes timestamps and speaker labels:
     - `[MM:SS Sensei]: ...` indicates speech from the Japanese instructor/teacher (Sensei).
     - `[MM:SS Estudiante]: ...` indicates speech from the student/learner (Estudiante).
-    It may switch between Japanese and English at any point, even mid-sentence — that's expected, not an error. The transcription may contain recognition errors; use context to recover the intended words.
+    It may switch between Japanese and English at any point, even mid-sentence, which is expected and not an error. The transcription may contain recognition errors; use context to recover the intended words.
 
-    Produce study notes the student will use to review this class later. The student will NOT go back to the transcript, so the notes must be exhaustive: capture EVERY vocabulary item, phrase, expression, grammar point, and correction that appears in the transcript — do not be selective or summarize items away.
+    Produce study notes the student will use to review this class later. The student will NOT go back to the transcript, so the notes must be exhaustive: capture EVERY vocabulary item, phrase, expression, grammar point, and correction that appears in the transcript: do not be selective or summarize items away.
+
+    Never use em-dashes (—), en-dashes (–), or spaced hyphens ( - ) as punctuation anywhere in title, overview, or notes. Use colons (:), commas, or parentheses instead.
 
     Return a JSON object with exactly three fields:
 
-    - "title": a short, specific title (3 to 8 words) describing what this class was actually about, in English. Base it on the real content — the topic, vocabulary, or grammar covered — so it's recognizable at a glance in a list. Do not include the date or the word "transcript". No surrounding quotes.
+    - "title": a short, specific title (3 to 8 words) describing what this class was actually about, in English. Base it on the real content (the topic, vocabulary, or grammar covered) so it is recognizable at a glance in a list. Do not include the date or the word "transcript". No surrounding quotes.
 
     - "overview": 2 to 4 sentences of session context in English: who took part, what kind of session it was (small talk, roleplay, new material, review), and what was covered at a high level.
 
@@ -36,41 +38,42 @@ struct GeminiClient {
 
       1. ### Bookmarked Moments (INCLUDE ONLY IF student bookmarked timestamps are provided below):
          If the student flagged bookmarked timestamps during class, this MUST be the first section. For each bookmarked timestamp, explain in detail what vocabulary, grammar, explanation, or correction occurred around that [MM:SS] moment in class. Format:
-         - **[MM:SS] Key Topic / Word** (kana · romaji) — "Concept meaning"
+         - **[MM:SS] Key Topic / Word** (kana reading / romaji): "Concept meaning"
              - Example: Detailed explanation of what was taught or clarified around this timestamp.
 
       2. Themed Content Sections (named after actual content):
-         Typical sections: Small Talk & Vocabulary in Context, New Vocabulary & Phrases, Grammar & Language Points, Roleplay Recap — adapt names to what really happened. Exhaustively cover all new Japanese material.
+         Typical sections: Small Talk & Vocabulary in Context, New Vocabulary & Phrases, Grammar & Language Points, Roleplay Recap: adapt names to what really happened. Exhaustively cover all new Japanese material.
 
       3. ### Corrections & Natural Phrasing:
          Leverage the distinction between Estudiante and Sensei. Capture every mistake in vocabulary, particle, conjugation, or unnatural phrasing spoken by Estudiante, and how Sensei corrected or rephrased it (or the natural Japanese phrasing if Estudiante struggled). Format strictly as:
-         - **Natural Japanese Form** (kana · romaji) — "English meaning"
+         - **Natural Japanese Form** (kana reading / romaji): "English meaning"
              - Example: Student said: [what student said or attempted] -> Natural phrasing: [natural correction + brief English explanation]
 
       4. ### Active Recall Mini-Quiz:
          Include 5 to 8 self-test questions strictly based on what was learned or corrected in the class (testing vocabulary, particle choices, verb conjugations, natural phrasing). Format strictly as:
          - **Q:** How do you say "..." in Japanese? (or fill-in-the-blank particle/verb form)
-             - Answer: **Japanese form** (kana · romaji) — brief explanation
+             - Answer: **Japanese form** (kana reading / romaji): brief explanation
 
       5. ### Anki Flashcards (Copy & Paste):
          The very last section must provide ready-to-copy flashcards for all new vocabulary, expressions, and grammar learned in the class. Format each bullet as:
          - Front (Japanese native form + reading) ; Back (English meaning + example sentence)
          Example:
-         - 手数料 (てすうりょう・tesūryō) ; transaction fee / commission fee — 手数料がかかります。
+         - 手数料 (てすうりょう / tesūryō) ; transaction fee / commission fee: 手数料がかかります。
 
       ### Japanese Formatting Rules (CRITICAL):
-      - Every Japanese term is bolded and formatted exactly like this, in this order: **native form** (kana reading · romaji) — "English meaning".
-      - The native form is however the word is normally written — kanji (plus okurigana) for most words, katakana for loanwords, hiragana for grammar particles/endings that have no kanji.
-      - If the native form already contains kanji, add its full reading in hiragana before the romaji, separated by " · ".
-      - If the native form is already pure kana (a katakana loanword, a hiragana-only word), do NOT repeat it — go straight to romaji.
+      - Every Japanese term is bolded and formatted exactly like this, in this order: **native form** (kana reading / romaji): "English meaning".
+      - The native form is however the word is normally written: kanji (plus okurigana) for most words, katakana for loanwords, hiragana for grammar particles/endings that have no kanji.
+      - If the native form already contains kanji, add its full reading in hiragana before the romaji, separated by " / ".
+      - If the native form is already pure kana (a katakana loanword, a hiragana-only word), do NOT repeat it, go straight to romaji.
         Examples:
-        - Kanji word: `**手数料** (てすうりょう・tesūryō) — "transaction fee / commission fee"`
-        - Katakana loanword (no separate kana reading needed): `**ポイントカード** (pointo kādo) — "point card / loyalty card"`
-        - Mixed kanji+kana: `**食べてみたい** (たべてみたい・tabete mitai) — "want to try eating"`
+        - Kanji word: `**手数料** (てすうりょう / tesūryō): "transaction fee / commission fee"`
+        - Katakana loanword (no separate kana reading needed): `**ポイントカード** (pointo kādo): "point card / loyalty card"`
+        - Mixed kanji+kana: `**食べてみたい** (たべてみたい / tabete mitai): "want to try eating"`
+        - Example: 手数料がかかります (てすうりょうがかかります / tesūryō ga kakarimasu): "There is a fee."
 
       ### Bullet Structure & Markdown Constraints:
-      - In any section listing vocabulary items, give AS MANY of them as possible an example sentence showing it used in context — pulled from the transcript when actually used, otherwise a natural example consistent with how it was taught.
-      - Every section is a flat list of top-level term bullets. A term's example, answer, or detail is its OWN bullet directly below it, indented exactly 4 spaces, starting with "- Example: " or "- Answer: " (the leading "- " is required — it is a bullet, not a plain indented line).
+      - In any section listing vocabulary items, give AS MANY of them as possible an example sentence showing it used in context: pulled from the transcript when actually used, otherwise a natural example consistent with how it was taught.
+      - Every section is a flat list of top-level term bullets. A term's example, answer, or detail is its OWN bullet directly below it, indented exactly 4 spaces, starting with "- Example: " or "- Answer: " (the leading "- " is required: it is a bullet, not a plain indented line).
       - Do NOT add any further nesting beyond this one level.
       - Use ONLY this Markdown: "###" headings, "- " bullets (indent sub-bullets with exactly 4 leading spaces, always keeping their own leading "- "), and "**bold**". No tables, links, code fences, numbered lists, italics, or other elements.
     """
@@ -124,7 +127,7 @@ struct GeminiClient {
                 throw AppError.geminiRateLimited(retryAfterSeconds: Self.parseRetryDelay(from: body))
             }
             if status == 503 {
-                // Server overload ("high demand"), not a quota problem —
+                // Server overload ("high demand"), not a quota problem:
                 // don't tell the user their quota ran out when it didn't.
                 throw AppError.geminiOverloaded
             }

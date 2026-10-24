@@ -107,4 +107,33 @@ final class AudioStoreTests: XCTestCase {
 
         assertSameFile(AudioStore.loadOldest(), mic)
     }
+
+    func testLoadOldestDeletesOrphanedCafFileWhenNoActiveRecording() throws {
+        AudioStore.hasActiveRecording = false
+        let orphanedCaf = AudioStore.newRecordingURL(name: "system-orphan.caf")
+        try Data("audio".utf8).write(to: orphanedCaf)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: orphanedCaf.path))
+
+        _ = AudioStore.loadOldest()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphanedCaf.path), "Orphaned .caf should be deleted when no active recording")
+    }
+
+    func testLoadOldestDeletesStaleCafFileEvenWhenActiveRecording() throws {
+        AudioStore.hasActiveRecording = true
+        defer { AudioStore.hasActiveRecording = false }
+
+        let staleCaf = AudioStore.newRecordingURL(name: "system-stale.caf")
+        try Data("stale audio".utf8).write(to: staleCaf)
+        let staleDate = Date().addingTimeInterval(-10800)
+        try FileManager.default.setAttributes([.modificationDate: staleDate], ofItemAtPath: staleCaf.path)
+
+        let freshCaf = AudioStore.newRecordingURL(name: "system-fresh.caf")
+        try Data("fresh audio".utf8).write(to: freshCaf)
+
+        _ = AudioStore.loadOldest()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staleCaf.path), "Stale .caf older than 2 hours should be deleted")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: freshCaf.path), "Fresh .caf should be preserved during active recording")
+    }
 }

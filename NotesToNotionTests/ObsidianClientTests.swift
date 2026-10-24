@@ -89,6 +89,18 @@ final class ObsidianClientTests: XCTestCase {
 
         let insertedLine = lines[pendingIndex - 1]
         XCTAssertTrue(insertedLine.contains("| \(today) | Clase particular |"), "Inserted line should be right before Pending")
+        XCTAssertTrue(insertedLine.contains("| Práctica oral |"), "Fourth column must be Práctica oral")
         XCTAssertTrue(insertedLine.contains("[Apunte en Notion](\(notionURL!.absoluteString))"), "Notion link should be present")
+    }
+
+    func testSanitizeCellPreservesCompoundWordHyphens() {
+        let client = ObsidianClient(token: "dummy_token")
+        let input = "Práctica de role-play y full-stack — sesión 1 - nivel N4"
+        let sanitized = client.sanitizeCell(input)
+        XCTAssertTrue(sanitized.contains("role-play"), "Should preserve role-play")
+        XCTAssertTrue(sanitized.contains("full-stack"), "Should preserve full-stack")
+        XCTAssertFalse(sanitized.contains("—"), "Should remove em-dash")
+        XCTAssertFalse(sanitized.contains(" - "), "Should replace spaced hyphen")
+        XCTAssertEqual(sanitized, "Práctica de role-play y full-stack: sesión 1: nivel N4")
     }
 }

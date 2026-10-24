@@ -22,8 +22,8 @@ struct NotionClient {
         // there's no usable title.
         let cleanedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let title = cleanedTitle.isEmpty
-            ? "Voice Note — \(dateStamp)"
-            : "\(cleanedTitle) — \(dateStamp)"
+            ? "Voice Note (\(dateStamp))"
+            : "\(cleanedTitle) (\(dateStamp))"
 
         var children: [[String: Any]] = []
         let markdown = (notesMarkdown ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -203,7 +203,7 @@ struct NotionClient {
     /// rich_text limit), preferring to cut at sentence boundaries.
     private static func chunkedParagraphs(_ text: String) -> [[String: Any]] {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return [paragraph("—")] }
+        guard !trimmed.isEmpty else { return [paragraph(".")] }
 
         var chunks: [String] = []
         var rest = Substring(trimmed)

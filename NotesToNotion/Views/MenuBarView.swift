@@ -18,7 +18,7 @@ struct MenuBarView: View {
             case .recording:
                 Text(appState.isCapturingSystemAudio
                     ? "Recording (Mic + System)… \(appState.formattedElapsed)"
-                    : "Recording (Mic Only - Check Screen Recording Permission)… \(appState.formattedElapsed)")
+                    : "Recording (Mic Only: Check Screen Recording Permission)… \(appState.formattedElapsed)")
                 Button(appState.isPaused ? "Resume Recording (⌘⇧P)" : "Pause Recording (⌘⇧P)") {
                     appState.togglePause()
                 }

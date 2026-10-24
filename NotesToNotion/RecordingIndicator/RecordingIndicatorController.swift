@@ -97,6 +97,12 @@ final class RecordingIndicatorController {
     /// shown or resized in case the display configuration or pill size changed.
     private func position(_ panel: NSPanel) {
         guard let screenFrame = NSScreen.main?.visibleFrame else { return }
+        if let contentView = panel.contentView {
+            let fitting = contentView.fittingSize
+            if fitting.width > 0 && fitting.height > 0 {
+                panel.setContentSize(fitting)
+            }
+        }
         let size = panel.frame.size
         panel.setFrameOrigin(NSPoint(
             x: screenFrame.maxX - size.width - 16,

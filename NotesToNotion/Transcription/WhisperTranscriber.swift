@@ -58,16 +58,9 @@ actor WhisperTranscriber {
         pipeline: WhisperKit,
         options: DecodingOptions
     ) async throws -> String {
-        // Channel 0 = Left = Estudiante (Mic)
-        // Channel 1 = Right = Sensei (System Audio)
-        let studentSamples = try AudioProcessor.loadAudioAsFloatArray(
-            fromPath: audioURL.path,
-            channelMode: .specificChannel(0)
-        )
-        let senseiSamples = try AudioProcessor.loadAudioAsFloatArray(
-            fromPath: audioURL.path,
-            channelMode: .specificChannel(1)
-        )
+        // Canal 0 = Izquierdo = Estudiante (Micrófono)
+        // Canal 1 = Derecho = Sensei (Audio del sistema)
+        let (studentSamples, senseiSamples) = try Self.loadStereoChannels(from: audioURL)
 
         let studentHasVoice = Self.hasVoiceEnergy(studentSamples)
         let senseiHasVoice = Self.hasVoiceEnergy(senseiSamples)
@@ -81,10 +74,18 @@ actor WhisperTranscriber {
         if senseiHasVoice {
             let normalizedSensei = Self.peakNormalized(senseiSamples)
             let senseiResults = try await pipeline.transcribe(audioArray: normalizedSensei, decodeOptions: options)
+            var hasSenseiSegments = false
             for segment in senseiResults.flatMap(\.segments) {
                 let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if Self.isValidSegmentText(text) {
                     labeledSegments.append(LabeledSegment(speaker: "Sensei", start: segment.start, text: text))
+                    hasSenseiSegments = true
+                }
+            }
+            if !hasSenseiSegments {
+                let fullText = senseiResults.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+                if Self.isValidSegmentText(fullText) {
+                    labeledSegments.append(LabeledSegment(speaker: "Sensei", start: 0.0, text: fullText))
                 }
             }
         }
@@ -92,10 +93,18 @@ actor WhisperTranscriber {
         if studentHasVoice {
             let normalizedStudent = Self.peakNormalized(studentSamples)
             let studentResults = try await pipeline.transcribe(audioArray: normalizedStudent, decodeOptions: options)
+            var hasStudentSegments = false
             for segment in studentResults.flatMap(\.segments) {
                 let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if Self.isValidSegmentText(text) {
                     labeledSegments.append(LabeledSegment(speaker: "Estudiante", start: segment.start, text: text))
+                    hasStudentSegments = true
+                }
+            }
+            if !hasStudentSegments {
+                let fullText = studentResults.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+                if Self.isValidSegmentText(fullText) {
+                    labeledSegments.append(LabeledSegment(speaker: "Estudiante", start: 0.0, text: fullText))
                 }
             }
         }
@@ -134,19 +143,110 @@ actor WhisperTranscriber {
             let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
             if Self.isValidSegmentText(text) {
                 let timestamp = Self.formatTimestamp(segment.start)
-                lines.append("[\(timestamp)]: \(text)")
+                lines.append("[\(timestamp) Estudiante]: \(text)")
             }
         }
 
         if lines.isEmpty {
             let fullText = results.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
             if !fullText.isEmpty {
-                return "[00:00]: \(fullText)"
+                return "[00:00 Estudiante]: \(fullText)"
             }
             return ""
         }
 
         return lines.joined(separator: "\n")
+    }
+
+    private static func loadStereoChannels(from audioURL: URL) throws -> (student: [Float], sensei: [Float]) {
+        let audioFile = try AVAudioFile(forReading: audioURL, commonFormat: .pcmFormatFloat32, interleaved: false)
+        let inputFormat = audioFile.processingFormat
+        let channelCount = Int(inputFormat.channelCount)
+
+        guard channelCount >= 2 else {
+            let mono = try AudioProcessor.loadAudioAsFloatArray(fromPath: audioURL.path)
+            return (student: mono, sensei: [])
+        }
+
+        let totalFrames = audioFile.length
+        guard totalFrames > 0 else {
+            return (student: [], sensei: [])
+        }
+
+        var studentSamples: [Float] = []
+        var senseiSamples: [Float] = []
+
+        if inputFormat.sampleRate == 16000 {
+            let chunkSize: AVAudioFrameCount = 32768
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: chunkSize) else {
+                throw AppError.recordingFailed("No se pudo asignar el buffer de audio.")
+            }
+            while audioFile.framePosition < totalFrames {
+                let framesToRead = min(chunkSize, AVAudioFrameCount(totalFrames - audioFile.framePosition))
+                try audioFile.read(into: buffer, frameCount: framesToRead)
+                if let ch0 = buffer.floatChannelData?[0], let ch1 = buffer.floatChannelData?[1] {
+                    let count = Int(buffer.frameLength)
+                    studentSamples.append(contentsOf: UnsafeBufferPointer(start: ch0, count: count))
+                    senseiSamples.append(contentsOf: UnsafeBufferPointer(start: ch1, count: count))
+                }
+            }
+            return (student: studentSamples, sensei: senseiSamples)
+        }
+
+        guard let targetFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16000,
+            channels: 2,
+            interleaved: false
+        ) else {
+            throw AppError.recordingFailed("No se pudo configurar el formato estéreo de 16 kHz.")
+        }
+
+        guard let converter = AVAudioConverter(from: inputFormat, to: targetFormat) else {
+            throw AppError.recordingFailed("No se pudo inicializar el conversor de audio.")
+        }
+
+        let inputChunkCapacity: AVAudioFrameCount = 32768
+        guard let inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: inputChunkCapacity) else {
+            throw AppError.recordingFailed("No se pudo asignar el buffer de entrada.")
+        }
+
+        let outputChunkCapacity = AVAudioFrameCount(ceil(Double(inputChunkCapacity) * 16000.0 / inputFormat.sampleRate)) + 1024
+        guard let outputBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outputChunkCapacity) else {
+            throw AppError.recordingFailed("No se pudo asignar el buffer de salida.")
+        }
+
+        while audioFile.framePosition < totalFrames {
+            let framesToRead = min(inputChunkCapacity, AVAudioFrameCount(totalFrames - audioFile.framePosition))
+            try audioFile.read(into: inputBuffer, frameCount: framesToRead)
+
+            var isProvided = false
+            var conversionError: NSError?
+            _ = converter.convert(to: outputBuffer, error: &conversionError) { _, outStatus in
+                if !isProvided {
+                    isProvided = true
+                    outStatus.pointee = .haveData
+                    return inputBuffer
+                } else {
+                    outStatus.pointee = .noDataNow
+                    return nil
+                }
+            }
+
+            if let conversionError {
+                throw AppError.recordingFailed("Error al convertir el audio: \(conversionError.localizedDescription)")
+            }
+
+            if outputBuffer.frameLength > 0,
+               let ch0 = outputBuffer.floatChannelData?[0],
+               let ch1 = outputBuffer.floatChannelData?[1] {
+                let count = Int(outputBuffer.frameLength)
+                studentSamples.append(contentsOf: UnsafeBufferPointer(start: ch0, count: count))
+                senseiSamples.append(contentsOf: UnsafeBufferPointer(start: ch1, count: count))
+            }
+        }
+
+        return (student: studentSamples, sensei: senseiSamples)
     }
 
     private static func hasVoiceEnergy(_ samples: [Float], threshold: Float = 0.015) -> Bool {

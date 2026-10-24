@@ -150,13 +150,29 @@ struct ObsidianClient {
 
         let cleanTema: String
         if let t = title, !t.isEmpty {
-            let sanitized = sanitizeForTableCell(t)
+            let sanitized = Self.sanitizeCell(t)
             cleanTema = sanitized.isEmpty ? "Clase particular de japones" : sanitized
         } else {
             cleanTema = "Clase particular de japones"
         }
 
-        let cleanCorrections = extractConciseCorrections(from: notesMarkdown, overview: overview)
+        let cleanCorrections: String
+        let extracted = Self.extractCorrectionsSummary(from: notesMarkdown ?? "")
+        if !extracted.isEmpty {
+            cleanCorrections = extracted
+        } else {
+            let cleanOverview = Self.sanitizeCell(overview)
+            if !cleanOverview.isEmpty {
+                if let dotIndex = cleanOverview.firstIndex(of: ".") {
+                    let sentence = String(cleanOverview[...dotIndex])
+                    cleanCorrections = sentence.count > 120 ? String(sentence.prefix(115)) : sentence
+                } else {
+                    cleanCorrections = cleanOverview.count > 120 ? String(cleanOverview.prefix(115)) : cleanOverview
+                }
+            } else {
+                cleanCorrections = "Sesión completada y revisada"
+            }
+        }
 
         let notionCell: String
         if let url = notionURL {
@@ -165,12 +181,12 @@ struct ObsidianClient {
             notionCell = "Resumen guardado en Notion"
         }
 
-        let newRow = "| \(today) | Clase particular | \(cleanTema) | Completada | \(cleanCorrections) | \(notionCell) |"
+        let newRow = "| \(today) | Clase particular | \(cleanTema) | Práctica oral | \(cleanCorrections) | \(notionCell) |"
 
-        return insertSessionRow(into: updatedYamlContent, newRow: newRow)
+        return Self.insertSessionRow(into: updatedYamlContent, newRow: newRow)
     }
 
-    private func insertSessionRow(into markdown: String, newRow: String) -> String {
+    internal static func insertSessionRow(into markdown: String, newRow: String) -> String {
         let lines = markdown.components(separatedBy: "\n")
         var outputLines: [String] = []
         var inSection6 = false
@@ -216,75 +232,120 @@ struct ObsidianClient {
         return outputLines.joined(separator: "\n")
     }
 
-    func extractConciseCorrections(from notesMarkdown: String?, overview: String) -> String {
-        if let markdown = notesMarkdown, !markdown.isEmpty {
-            if let correctionsRange = markdown.range(of: "### Corrections & Natural Phrasing:") {
-                let substring = markdown[correctionsRange.upperBound...]
-                let sectionText: Substring
-                if let nextHeading = substring.range(of: "### ") {
-                    sectionText = substring[..<nextHeading.lowerBound]
-                } else {
-                    sectionText = substring
-                }
+    internal static func extractCorrectionsSummary(from notesMarkdown: String) -> String {
+        guard !notesMarkdown.isEmpty else { return "" }
+        guard let correctionsRange = notesMarkdown.range(of: "### Corrections & Natural Phrasing") else {
+            return ""
+        }
 
-                let lines = sectionText.components(separatedBy: .newlines)
-                var extracted: [String] = []
-                for line in lines {
-                    let trimmed = line.trimmingCharacters(in: .whitespaces)
-                    if trimmed.hasPrefix("- **") {
-                        let cleanedBullet = trimmed
-                            .replacingOccurrences(of: "- **", with: "")
-                            .replacingOccurrences(of: "**", with: "")
-                        let sanitized = sanitizeForTableCell(cleanedBullet)
-                        if !sanitized.isEmpty {
-                            extracted.append(sanitized)
-                        }
-                        if extracted.count >= 2 {
-                            break
-                        }
-                    }
+        let substring = notesMarkdown[correctionsRange.upperBound...]
+        let sectionText: Substring
+        if let nextHeading = substring.range(of: "### ") {
+            sectionText = substring[..<nextHeading.lowerBound]
+        } else {
+            sectionText = substring
+        }
+
+        let lines = sectionText.components(separatedBy: .newlines)
+        var items: [(bullet: String, example: String?)] = []
+        var currentBullet: String?
+        var currentExample: String?
+
+        for rawLine in lines {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+
+            let isIndented = rawLine.hasPrefix("  ") || rawLine.hasPrefix("\t")
+            if !isIndented && trimmed.hasPrefix("- ") && !trimmed.contains("Example:") {
+                if let b = currentBullet {
+                    items.append((bullet: b, example: currentExample))
+                    if items.count >= 2 { break }
                 }
-                if !extracted.isEmpty {
-                    let joined = extracted.joined(separator: ", ")
-                    if joined.count > 120 {
-                        let prefix = String(joined.prefix(115))
-                        if let lastSpace = prefix.lastIndex(of: " ") {
-                            return String(prefix[..<lastSpace])
-                        }
-                        return prefix
-                    }
-                    return joined
+                currentBullet = trimmed
+                currentExample = nil
+            } else if trimmed.contains("Example:") {
+                if currentExample == nil {
+                    currentExample = trimmed
+                }
+            }
+        }
+        if let b = currentBullet, items.count < 2 {
+            items.append((bullet: b, example: currentExample))
+        }
+
+        var extracted: [String] = []
+        if !items.isEmpty {
+            for item in items.prefix(2) {
+                let source = item.bullet
+                let cleaned = source
+                    .replacingOccurrences(of: "- Example:", with: "")
+                    .replacingOccurrences(of: "Example:", with: "")
+                    .replacingOccurrences(of: "- **", with: "")
+                    .replacingOccurrences(of: "- ", with: "")
+                    .replacingOccurrences(of: "->", with: ", ")
+                    .replacingOccurrences(of: "**", with: "")
+                let sanitized = sanitizeCell(cleaned)
+                if !sanitized.isEmpty {
+                    extracted.append(sanitized)
+                }
+            }
+        } else {
+            for rawLine in lines {
+                let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty else { continue }
+                let cleaned = trimmed
+                    .replacingOccurrences(of: "- Example:", with: "")
+                    .replacingOccurrences(of: "Example:", with: "")
+                    .replacingOccurrences(of: "- **", with: "")
+                    .replacingOccurrences(of: "- ", with: "")
+                    .replacingOccurrences(of: "->", with: ", ")
+                    .replacingOccurrences(of: "**", with: "")
+                let sanitized = sanitizeCell(cleaned)
+                if !sanitized.isEmpty {
+                    extracted.append(sanitized)
+                    if extracted.count >= 2 { break }
                 }
             }
         }
 
-        let cleanOverview = sanitizeForTableCell(overview)
-        if !cleanOverview.isEmpty {
-            if let dotIndex = cleanOverview.firstIndex(of: ".") {
-                let sentence = String(cleanOverview[...dotIndex])
-                if sentence.count > 120 {
-                    let prefix = String(sentence.prefix(115))
-                    if let lastSpace = prefix.lastIndex(of: " ") {
-                        return String(prefix[..<lastSpace])
-                    }
-                    return prefix
-                }
-                return sentence
+        guard !extracted.isEmpty else { return "" }
+        let joined = extracted.joined(separator: ", ")
+        let sanitized = sanitizeCell(joined)
+        if sanitized.count > 120 {
+            let prefix = String(sanitized.prefix(115))
+            if let lastSpace = prefix.lastIndex(of: " ") {
+                return sanitizeCell(String(prefix[..<lastSpace]))
             }
-            if cleanOverview.count > 120 {
-                let prefix = String(cleanOverview.prefix(115))
-                if let lastSpace = prefix.lastIndex(of: " ") {
-                    return String(prefix[..<lastSpace])
-                }
-                return prefix
-            }
-            return cleanOverview
+            return sanitizeCell(prefix)
         }
+        return sanitized
+    }
 
-        return "Sesión completada y revisada"
+    func sanitizeCell(_ text: String) -> String {
+        Self.sanitizeCell(text)
     }
 
     func sanitizeForTableCell(_ text: String) -> String {
+        Self.sanitizeCell(text)
+    }
+
+    func extractConciseCorrections(from notesMarkdown: String?, overview: String) -> String {
+        let extracted = Self.extractCorrectionsSummary(from: notesMarkdown ?? "")
+        if !extracted.isEmpty {
+            return extracted
+        }
+        let cleanOverview = Self.sanitizeCell(overview)
+        if !cleanOverview.isEmpty {
+            if let dotIndex = cleanOverview.firstIndex(of: ".") {
+                let sentence = String(cleanOverview[...dotIndex])
+                return sentence.count > 120 ? String(sentence.prefix(115)) : sentence
+            }
+            return cleanOverview.count > 120 ? String(cleanOverview.prefix(115)) : cleanOverview
+        }
+        return "Sesión completada y revisada"
+    }
+
+    internal static func sanitizeCell(_ text: String) -> String {
         var result = ""
         for scalar in text.unicodeScalars {
             let isRealEmoji = scalar.value > 0x7F && (scalar.properties.isEmojiPresentation || scalar.value >= 0x1F300 || (scalar.properties.isEmoji && scalar.value > 0x2000))
@@ -294,13 +355,13 @@ struct ObsidianClient {
         }
 
         result = result.replacingOccurrences(of: "|", with: ", ")
+        result = result.replacingOccurrences(of: "->", with: ", ")
 
         result = result.replacingOccurrences(of: " — ", with: ": ")
         result = result.replacingOccurrences(of: " – ", with: ": ")
-        result = result.replacingOccurrences(of: " - ", with: ": ")
-        result = result.replacingOccurrences(of: "—", with: " ")
-        result = result.replacingOccurrences(of: "–", with: " ")
-        result = result.replacingOccurrences(of: "-", with: " ")
+        result = result.replacingOccurrences(of: #"\s+-\s+"#, with: ": ", options: .regularExpression)
+        result = result.replacingOccurrences(of: "—", with: ": ")
+        result = result.replacingOccurrences(of: "–", with: ": ")
 
         result = result.replacingOccurrences(of: "\r\n", with: " ")
         result = result.replacingOccurrences(of: "\n", with: " ")

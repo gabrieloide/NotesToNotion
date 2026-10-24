@@ -11,6 +11,7 @@ enum AudioStore {
     /// directory so they don't read or write the user's actual pending
     /// recordings.
     static var baseDirectory: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    static var hasActiveRecording: Bool = false
 
     private static var directory: URL {
         let dir = baseDirectory.appendingPathComponent("NotesToNotion/PendingAudio", isDirectory: true)
@@ -20,7 +21,7 @@ enum AudioStore {
 
     /// A fresh durable file URL for a new recording. Mic and system-audio
     /// capture write here directly from the moment recording starts,
-    /// instead of the (OS-purgeable, crash-unsafe) system temp directory —
+    /// instead of the (OS-purgeable, crash-unsafe) system temp directory:
     /// so a class survives even if the app never reaches a clean `stop()`.
     static func newRecordingURL(name: String) -> URL {
         directory.appendingPathComponent(name)
@@ -31,7 +32,7 @@ enum AudioStore {
     }
 
     /// The oldest recording left behind by a previous run that never made
-    /// it to a transcript — a Whisper failure, or the app quitting or
+    /// it to a transcript: a Whisper failure, or the app quitting or
     /// crashing mid-recording/mid-transcription.
     ///
     /// Only considers `.m4a` files: both a mic-only and a mixed recording
@@ -44,6 +45,14 @@ enum AudioStore {
             includingPropertiesForKeys: [.contentModificationDateKey]
         ) else {
             return nil
+        }
+        let now = Date()
+        for file in files where file.pathExtension == "caf" {
+            let modDate = modificationDate(file)
+            let isStale = now.timeIntervalSince(modDate) > 7200
+            if !hasActiveRecording || isStale {
+                try? FileManager.default.removeItem(at: file)
+            }
         }
         return files
             .filter { $0.pathExtension == "m4a" }

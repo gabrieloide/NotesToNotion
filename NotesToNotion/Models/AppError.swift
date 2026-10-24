@@ -22,13 +22,13 @@ enum AppError: LocalizedError {
         case .recordingFailed(let detail):
             "Recording failed: \(detail)"
         case .noSpeechDetected:
-            "No speech was detected in the recording — it may have been too quiet or the mic didn't pick you up. Nothing was saved. Try speaking a bit louder or closer to the mic."
+            "No speech was detected in the recording: it may have been too quiet or the mic didn't pick you up. Nothing was saved. Try speaking a bit louder or closer to the mic."
         case .geminiRequestFailed(let detail):
             "Gemini failed: \(detail)"
         case .geminiRateLimited:
-            "Gemini's free-tier quota is used up right now. Your transcript is saved locally — hit Retry in a minute (or later if the daily quota ran out)."
+            "Gemini's free-tier quota is used up right now. Your transcript is saved locally. Hit Retry in a minute (or later if the daily quota ran out)."
         case .geminiOverloaded:
-            "Gemini's servers are temporarily overloaded (not a quota issue). Your transcript is saved locally — hit Retry in a minute."
+            "Gemini's servers are temporarily overloaded (not a quota issue). Your transcript is saved locally. Hit Retry in a minute."
         case .geminiMalformedResponse:
             "Gemini returned a response that couldn't be parsed."
         case .notionDatabaseNotShared:

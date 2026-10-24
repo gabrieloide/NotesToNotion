@@ -22,7 +22,6 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
 
     // Pause/Resume state
     private var isPaused: Bool = false
-    private var totalPausedDuration: CMTime = .zero
     private var pauseStartHostTime: CMTime?
 
     // Thread-safe level metering
@@ -82,7 +81,6 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
             self.startHostTime = startTime
             self.nextExpectedSampleTime = startTime
             self.isPaused = false
-            self.totalPausedDuration = .zero
             self.pauseStartHostTime = nil
         }
 
@@ -121,7 +119,6 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
             guard self.isPaused else { return }
             if let pauseStart = self.pauseStartHostTime {
                 let pausedDelta = CMTimeSubtract(resumeTime, pauseStart)
-                self.totalPausedDuration = CMTimeAdd(self.totalPausedDuration, pausedDelta)
                 if let expected = self.nextExpectedSampleTime {
                     self.nextExpectedSampleTime = CMTimeAdd(expected, pausedDelta)
                 }
@@ -146,7 +143,6 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
             if self.isPaused, let pauseStart = self.pauseStartHostTime {
                 let pausedDelta = CMTimeSubtract(endHostTime, pauseStart)
                 if CMTimeCompare(pausedDelta, .zero) > 0 {
-                    self.totalPausedDuration = CMTimeAdd(self.totalPausedDuration, pausedDelta)
                     if let expected = self.nextExpectedSampleTime {
                         self.nextExpectedSampleTime = CMTimeAdd(expected, pausedDelta)
                     }

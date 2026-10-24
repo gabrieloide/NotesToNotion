@@ -44,6 +44,7 @@ final class RecordingManager {
         }
 
         guard recorder.record() else {
+            AudioStore.hasActiveRecording = false
             if let systemAudioRecorder {
                 await systemAudioRecorder.stop()
                 self.systemAudioRecorder = nil
@@ -52,6 +53,7 @@ final class RecordingManager {
             }
             throw AppError.recordingFailed("the microphone didn't start recording.")
         }
+        AudioStore.hasActiveRecording = true
         self.systemAudioRecorder?.synchronizeStartTime()
         self.micRecorder = recorder
         self.isPaused = false
@@ -95,6 +97,7 @@ final class RecordingManager {
     }
 
     func stop() async -> URL? {
+        defer { AudioStore.hasActiveRecording = false }
         isPaused = false
         isCapturingSystemAudio = false
         guard let micRecorder else { return nil }

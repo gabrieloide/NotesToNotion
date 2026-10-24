@@ -34,10 +34,10 @@ final class AppState {
     var systemLevel: Float = 0.0
 
     /// A Gemini result that made it through transcription but hasn't been
-    /// confirmed saved to Notion yet — either from this session's last
+    /// confirmed saved to Notion yet: either from this session's last
     /// failure, or recovered from disk after the app quit mid-flow.
     var pendingNote: PendingNote?
-    /// A recording that hasn't made it to a transcript yet — either this
+    /// A recording that hasn't made it to a transcript yet: either this
     /// session's last transcription failure, or recovered from disk after
     /// the app quit mid-transcription. Never deleted until its transcript
     /// is durably saved, so a WhisperKit failure can't lose the class.
@@ -51,6 +51,8 @@ final class AppState {
     private var powerAssertionID: IOPMAssertionID = 0
     private var isProcessingInFlight: Bool = false
     private var shouldAutoResumeOnWake: Bool = false
+    private var isStartingRecording: Bool = false
+    private var networkRetryCount: Int = 0
 
     private static let bookmarksKey = "pending_bookmarks"
     // Safety cap for recordings left running by accident.
@@ -58,14 +60,12 @@ final class AppState {
 
     init() {
         hasCredentials = Self.credentialsPresent()
-        if let savedBookmarks = UserDefaults.standard.array(forKey: Self.bookmarksKey) as? [Int] {
-            bookmarks = savedBookmarks
-        }
         if let recovered = PendingNoteStore.loadOldest() {
             pendingNote = recovered
             phase = .error("Found a note from a previous session that wasn't saved to Notion yet.")
         } else if let recoveredAudio = AudioStore.loadOldest() {
             pendingAudioURL = recoveredAudio
+            bookmarks = (UserDefaults.standard.array(forKey: Self.bookmarksKey) as? [Int]) ?? []
             phase = .error("Found a recording from a previous session that wasn't transcribed yet.")
         }
 
@@ -85,7 +85,7 @@ final class AppState {
     var menuBarIcon: String {
         switch phase {
         case .idle: "mic.circle"
-        case .recording: "record.circle.fill"
+        case .recording: isPaused ? "pause.circle.fill" : "record.circle.fill"
         case .processing: "hourglass.circle"
         case .success: "checkmark.circle"
         case .error: "exclamationmark.circle"
@@ -127,10 +127,13 @@ final class AppState {
     }
 
     func startRecording() {
+        guard phase != .recording, !isStartingRecording else { return }
         guard hasCredentials else {
             phase = .error(AppError.missingCredentials.localizedDescription)
             return
         }
+        isStartingRecording = true
+        networkRetryCount = 0
         bookmarks = []
         UserDefaults.standard.removeObject(forKey: Self.bookmarksKey)
         isPaused = false
@@ -138,6 +141,7 @@ final class AppState {
         systemLevel = 0.0
 
         Task {
+            defer { isStartingRecording = false }
             do {
                 try await recorder.start()
                 isCapturingSystemAudio = recorder.isCapturingSystemAudio
@@ -151,6 +155,8 @@ final class AppState {
     }
 
     func stopAndProcess() {
+        guard phase == .recording else { return }
+        phase = .processing("Finalizing audio…")
         timer?.invalidate()
         timer = nil
         meterTimer?.invalidate()
@@ -245,7 +251,7 @@ final class AppState {
                 throw AppError.noSpeechDetected
             }
 
-            // The transcript is now durably saved on its own — the raw
+            // The transcript is now durably saved on its own, so the raw
             // audio is no longer the only copy of the class, so it's safe
             // to delete.
             var note = PendingNote(
@@ -287,8 +293,9 @@ final class AppState {
             phase = .error(Self.message(for: AppError.noSpeechDetected))
         } catch {
             phase = .error(Self.message(for: error))
-            if isNetworkError(error) && shouldAutoResumeOnWake {
-                print("Network error detected during transcription/summarization. Will retry in 3 seconds…")
+            if isNetworkError(error) && shouldAutoResumeOnWake && networkRetryCount < 3 {
+                networkRetryCount += 1
+                print("Network error detected during transcription/summarization (retry \(networkRetryCount)/3). Will retry in 3 seconds…")
                 Task { @MainActor [weak self] in
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
                     guard let self, self.shouldAutoResumeOnWake, !self.isProcessingInFlight else { return }
@@ -356,8 +363,9 @@ final class AppState {
                 try await saveToNotion(updatedNote)
             } catch {
                 phase = .error(Self.message(for: error))
-                if isNetworkError(error) && shouldAutoResumeOnWake {
-                    print("Network error detected during note retry. Will retry in 3 seconds…")
+                if isNetworkError(error) && shouldAutoResumeOnWake && networkRetryCount < 3 {
+                    networkRetryCount += 1
+                    print("Network error detected during note retry (retry \(networkRetryCount)/3). Will retry in 3 seconds…")
                     Task { @MainActor [weak self] in
                         try? await Task.sleep(nanoseconds: 3_000_000_000)
                         guard let self, self.shouldAutoResumeOnWake, !self.isProcessingInFlight else { return }
@@ -388,6 +396,21 @@ final class AppState {
                     keyPoints: [],
                     transcript: note.result.transcript
                 )
+
+                if let githubToken = KeychainStore.read(.githubToken), !githubToken.isEmpty {
+                    phase = .processing("Syncing session to Obsidian vault…")
+                    do {
+                        let obsidian = ObsidianClient(token: githubToken)
+                        try await obsidian.recordClassSession(
+                            title: "Voice Note",
+                            overview: "Voice note transcript (saved without Gemini notes).",
+                            notesMarkdown: nil,
+                            notionURL: pageURL
+                        )
+                    } catch {
+                        print("WARN: Obsidian sync failed: \(error)")
+                    }
+                }
 
                 PendingNoteStore.delete(id: note.id)
                 pendingNote = nil
@@ -451,6 +474,7 @@ final class AppState {
     }
 
     private func notifySuccess(pageURL: URL?) {
+        networkRetryCount = 0
         phase = .success(pageURL)
         NSSound(named: "Glass")?.play()
 
