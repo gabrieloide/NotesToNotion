@@ -25,7 +25,7 @@ final class RecordingManager {
 
         let recorder = try AVAudioRecorder(url: micURL, settings: settings)
         recorder.isMeteringEnabled = true
-        isPaused = false
+        recorder.prepareToRecord()
 
         // Start system audio capture before or simultaneously with the microphone
         // so startHostTime aligns with the microphone start.
@@ -52,7 +52,9 @@ final class RecordingManager {
             }
             throw AppError.recordingFailed("the microphone didn't start recording.")
         }
+        self.systemAudioRecorder?.synchronizeStartTime()
         self.micRecorder = recorder
+        self.isPaused = false
     }
 
     func pause() {

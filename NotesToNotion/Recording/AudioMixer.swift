@@ -6,9 +6,7 @@ import Darwin
 /// of two independent ones.
 enum AudioMixer {
     private static let renderSampleRate = 44100.0
-    // Moderate gain with hyperbolic tangent (tanh) soft clipping to boost quiet speech
-    // while preventing harsh distortion when both parties speak at the same time.
-    private static let gain: Float = 2.0
+    private static let postMixGain: Float = 1.2
 
     static func mix(micURL: URL, systemURL: URL, outputURL: URL) throws {
         let micFile = try AVAudioFile(forReading: micURL)

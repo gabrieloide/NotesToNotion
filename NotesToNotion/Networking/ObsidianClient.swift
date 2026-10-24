@@ -122,7 +122,7 @@ struct ObsidianClient {
         }
     }
 
-    private func updatePlanContent(
+    func updatePlanContent(
         originalContent: String,
         title: String?,
         overview: String,
@@ -216,7 +216,7 @@ struct ObsidianClient {
         return outputLines.joined(separator: "\n")
     }
 
-    private func extractConciseCorrections(from notesMarkdown: String?, overview: String) -> String {
+    func extractConciseCorrections(from notesMarkdown: String?, overview: String) -> String {
         if let markdown = notesMarkdown, !markdown.isEmpty {
             if let correctionsRange = markdown.range(of: "### Corrections & Natural Phrasing:") {
                 let substring = markdown[correctionsRange.upperBound...]
@@ -284,7 +284,7 @@ struct ObsidianClient {
         return "Sesión completada y revisada"
     }
 
-    private func sanitizeForTableCell(_ text: String) -> String {
+    func sanitizeForTableCell(_ text: String) -> String {
         var result = ""
         for scalar in text.unicodeScalars {
             let isRealEmoji = scalar.value > 0x7F && (scalar.properties.isEmojiPresentation || scalar.value >= 0x1F300 || (scalar.properties.isEmoji && scalar.value > 0x2000))

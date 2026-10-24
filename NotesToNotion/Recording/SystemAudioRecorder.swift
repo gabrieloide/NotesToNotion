@@ -74,6 +74,9 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: writeQueue)
 
+        try await stream.startCapture()
+        self.stream = stream
+
         let startTime = CMClockGetTime(CMClockGetHostTimeClock())
         writeQueue.sync {
             self.startHostTime = startTime
@@ -88,9 +91,15 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
             state.lastBufferDate = Date()
             state.isPaused = false
         }
+    }
 
-        try await stream.startCapture()
-        self.stream = stream
+    func synchronizeStartTime() {
+        let now = CMClockGetTime(CMClockGetHostTimeClock())
+        writeQueue.sync {
+            guard self.audioFile == nil else { return }
+            self.startHostTime = now
+            self.nextExpectedSampleTime = now
+        }
     }
 
     func pause() {
@@ -132,18 +141,21 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
         }
         self.stream = nil
 
-        let stopTime = CMClockGetTime(CMClockGetHostTimeClock())
+        let endHostTime = CMClockGetTime(CMClockGetHostTimeClock())
         writeQueue.sync {
             if self.isPaused, let pauseStart = self.pauseStartHostTime {
-                let pausedDelta = CMTimeSubtract(stopTime, pauseStart)
-                if let expected = self.nextExpectedSampleTime {
-                    self.nextExpectedSampleTime = CMTimeAdd(expected, pausedDelta)
+                let pausedDelta = CMTimeSubtract(endHostTime, pauseStart)
+                if CMTimeCompare(pausedDelta, .zero) > 0 {
+                    self.totalPausedDuration = CMTimeAdd(self.totalPausedDuration, pausedDelta)
+                    if let expected = self.nextExpectedSampleTime {
+                        self.nextExpectedSampleTime = CMTimeAdd(expected, pausedDelta)
+                    }
                 }
-                self.isPaused = false
                 self.pauseStartHostTime = nil
+                self.isPaused = false
             }
             if let audioFile = self.audioFile, let format = self.recordedFormat, let expected = self.nextExpectedSampleTime {
-                let gapSeconds = CMTimeGetSeconds(CMTimeSubtract(stopTime, expected))
+                let gapSeconds = CMTimeGetSeconds(CMTimeSubtract(endHostTime, expected))
                 if gapSeconds > 0.02 && gapSeconds < 3600 {
                     self.writeSilence(duration: gapSeconds, format: format, to: audioFile)
                 }
