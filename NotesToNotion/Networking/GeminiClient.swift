@@ -15,7 +15,11 @@ struct GeminiClient {
     // MARK: - Generate study notes from a transcript
 
     private static let studyNotesPrompt = """
-    The following is a transcript of a one-on-one online Japanese class, transcribed locally on-device. It may switch between Japanese and English at any point, even mid-sentence — that's expected, not an error. The transcription may contain recognition errors; use context to recover the intended words.
+    The following is a transcript of a one-on-one online Japanese class, transcribed locally on-device.
+    The transcript includes timestamps and speaker labels:
+    - `[MM:SS Sensei]: ...` indicates speech from the Japanese instructor/teacher (Sensei).
+    - `[MM:SS Estudiante]: ...` indicates speech from the student/learner (Estudiante).
+    It may switch between Japanese and English at any point, even mid-sentence — that's expected, not an error. The transcription may contain recognition errors; use context to recover the intended words.
 
     Produce study notes the student will use to review this class later. The student will NOT go back to the transcript, so the notes must be exhaustive: capture EVERY vocabulary item, phrase, expression, grammar point, and correction that appears in the transcript — do not be selective or summarize items away.
 
@@ -26,27 +30,67 @@ struct GeminiClient {
     - "overview": 2 to 4 sentences of session context in English: who took part, what kind of session it was (small talk, roleplay, new material, review), and what was covered at a high level.
 
     - "notes": the full study notes in English, formatted as Markdown. Rules for the notes:
-      - Organize into sections with "###" headings named after the actual content of the class. Typical sections when they apply: Small Talk & Vocabulary in Context, Roleplay Recap, New Vocabulary & Phrases, Grammar & Language Points, Corrections, Time/Topic-specific sections — but adapt the names to what really happened.
-      - Every Japanese term is bolded and formatted exactly like this, in this order: **native form** (kana reading · romaji) — "English meaning". The native form is however the word is normally written — kanji (plus okurigana) for most words, katakana for loanwords, hiragana for grammar particles/endings that have no kanji. If the native form already contains kanji, add its full reading in hiragana before the romaji, separated by " · ". If the native form is already pure kana (a katakana loanword, a hiragana-only word), do NOT repeat it — go straight to romaji. Examples:
+
+      ### Required Structure and Sections:
+      Organize into sections with "###" headings in the following order:
+
+      1. ### Bookmarked Moments (INCLUDE ONLY IF student bookmarked timestamps are provided below):
+         If the student flagged bookmarked timestamps during class, this MUST be the first section. For each bookmarked timestamp, explain in detail what vocabulary, grammar, explanation, or correction occurred around that [MM:SS] moment in class. Format:
+         - **[MM:SS] Key Topic / Word** (kana · romaji) — "Concept meaning"
+             - Example: Detailed explanation of what was taught or clarified around this timestamp.
+
+      2. Themed Content Sections (named after actual content):
+         Typical sections: Small Talk & Vocabulary in Context, New Vocabulary & Phrases, Grammar & Language Points, Roleplay Recap — adapt names to what really happened. Exhaustively cover all new Japanese material.
+
+      3. ### Corrections & Natural Phrasing:
+         Leverage the distinction between Estudiante and Sensei. Capture every mistake in vocabulary, particle, conjugation, or unnatural phrasing spoken by Estudiante, and how Sensei corrected or rephrased it (or the natural Japanese phrasing if Estudiante struggled). Format strictly as:
+         - **Natural Japanese Form** (kana · romaji) — "English meaning"
+             - Example: Student said: [what student said or attempted] -> Natural phrasing: [natural correction + brief English explanation]
+
+      4. ### Active Recall Mini-Quiz:
+         Include 5 to 8 self-test questions strictly based on what was learned or corrected in the class (testing vocabulary, particle choices, verb conjugations, natural phrasing). Format strictly as:
+         - **Q:** How do you say "..." in Japanese? (or fill-in-the-blank particle/verb form)
+             - Answer: **Japanese form** (kana · romaji) — brief explanation
+
+      5. ### Anki Flashcards (Copy & Paste):
+         The very last section must provide ready-to-copy flashcards for all new vocabulary, expressions, and grammar learned in the class. Format each bullet as:
+         - Front (Japanese native form + reading) ; Back (English meaning + example sentence)
+         Example:
+         - 手数料 (てすうりょう・tesūryō) ; transaction fee / commission fee — 手数料がかかります。
+
+      ### Japanese Formatting Rules (CRITICAL):
+      - Every Japanese term is bolded and formatted exactly like this, in this order: **native form** (kana reading · romaji) — "English meaning".
+      - The native form is however the word is normally written — kanji (plus okurigana) for most words, katakana for loanwords, hiragana for grammar particles/endings that have no kanji.
+      - If the native form already contains kanji, add its full reading in hiragana before the romaji, separated by " · ".
+      - If the native form is already pure kana (a katakana loanword, a hiragana-only word), do NOT repeat it — go straight to romaji.
+        Examples:
         - Kanji word: `**手数料** (てすうりょう・tesūryō) — "transaction fee / commission fee"`
         - Katakana loanword (no separate kana reading needed): `**ポイントカード** (pointo kādo) — "point card / loyalty card"`
         - Mixed kanji+kana: `**食べてみたい** (たべてみたい・tabete mitai) — "want to try eating"`
-      - In any section that lists several vocabulary items (vocabulary, phrases, grammar points), give AS MANY of them as possible an example sentence showing it used in context — pulled from the transcript when the class actually used it that way, otherwise a natural example consistent with how it was taught. Don't leave a section as a bare list of term-meaning pairs when examples are available; that's the difference between a dictionary and study notes.
-      - Include any corrections the instructor made to the student's Japanese (what was said vs. the natural phrasing), each with its own example if useful.
-      - Every section is a flat list of top-level term bullets. A term's example, if it has one, is its OWN bullet directly below it, indented exactly 4 spaces, starting with "- Example: " (the leading "- " is required — it is a bullet, not a plain indented line). Do not add any further nesting beyond this one level. Required shape for one term with an example, reproduced literally including both leading dashes:
-        - **手数料** (てすうりょう・tesūryō) — "transaction fee / commission fee"
-            - Example: 手数料がかかります (てすうりょうがかかります・tesūryō ga kakarimasu) — "There is a fee."
-      - Use ONLY this Markdown: "###" headings, "- " bullets (indent example bullets with exactly 4 leading spaces, always keeping their own leading "- "), and "**bold**". No tables, links, code fences, numbered lists, italics, or other elements.
+
+      ### Bullet Structure & Markdown Constraints:
+      - In any section listing vocabulary items, give AS MANY of them as possible an example sentence showing it used in context — pulled from the transcript when actually used, otherwise a natural example consistent with how it was taught.
+      - Every section is a flat list of top-level term bullets. A term's example, answer, or detail is its OWN bullet directly below it, indented exactly 4 spaces, starting with "- Example: " or "- Answer: " (the leading "- " is required — it is a bullet, not a plain indented line).
+      - Do NOT add any further nesting beyond this one level.
+      - Use ONLY this Markdown: "###" headings, "- " bullets (indent sub-bullets with exactly 4 leading spaces, always keeping their own leading "- "), and "**bold**". No tables, links, code fences, numbered lists, italics, or other elements.
     """
 
-    func summarize(transcript: String) async throws -> (title: String, overview: String, notes: String) {
+    func summarize(transcript: String, bookmarks: [Int] = []) async throws -> (title: String, overview: String, notes: String) {
+        var parts: [[String: String]] = [
+            ["text": Self.studyNotesPrompt],
+        ]
+        if !bookmarks.isEmpty {
+            let formatted = bookmarks.sorted().map { Self.formatTimestamp($0) }.joined(separator: ", ")
+            parts.append([
+                "text": "Student Bookmarked Timestamps (moments the student flagged live during class as important/difficult): \(formatted)"
+            ])
+        }
+        parts.append(["text": "Transcript:\n\(transcript)"])
+
         let requestBody: [String: Any] = [
             "contents": [
                 [
-                    "parts": [
-                        ["text": Self.studyNotesPrompt],
-                        ["text": "Transcript:\n\(transcript)"],
-                    ]
+                    "parts": parts,
                 ]
             ],
             "generationConfig": [
@@ -87,6 +131,13 @@ struct GeminiClient {
             throw AppError.geminiRequestFailed(Self.describeFailure(response, body))
         }
         return try Self.parseNotes(from: body)
+    }
+
+    private static func formatTimestamp(_ seconds: Int) -> String {
+        let clamped = max(0, seconds)
+        let m = clamped / 60
+        let s = clamped % 60
+        return String(format: "%02d:%02d", m, s)
     }
 
     private struct GenerateContentResponse: Decodable {

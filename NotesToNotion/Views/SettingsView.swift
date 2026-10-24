@@ -6,6 +6,7 @@ struct SettingsView: View {
     @State private var geminiKey = ""
     @State private var notionToken = ""
     @State private var databaseID = ""
+    @State private var githubToken = ""
     @State private var saved = false
 
     var body: some View {
@@ -14,8 +15,9 @@ struct SettingsView: View {
                 SecureField("Gemini API Key", text: $geminiKey)
                 SecureField("Notion Integration Token", text: $notionToken)
                 TextField("Notion Database ID", text: $databaseID)
+                SecureField("GitHub Token (Obsidian Sync)", text: $githubToken)
             } footer: {
-                Text("Create an internal integration at notion.so/my-integrations, share your \"Voice Notes\" database with it (••• → Connections), and copy the 32-character ID from the database's URL.")
+                Text("Create an internal integration at notion.so/my-integrations, share your \"Voice Notes\" database with it (••• → Connections), and copy the 32-character ID from the database's URL. The GitHub token is optional and used to record Japanese class sessions in your Obsidian vault.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -25,13 +27,14 @@ struct SettingsView: View {
                     KeychainStore.save(.geminiAPIKey, value: geminiKey)
                     KeychainStore.save(.notionToken, value: notionToken)
                     KeychainStore.save(.notionDatabaseID, value: databaseID)
+                    KeychainStore.save(.githubToken, value: githubToken)
                     appState.refreshCredentials()
                     saved = true
                 }
                 .keyboardShortcut(.defaultAction)
 
                 if saved {
-                    Text("Saved ✓")
+                    Text("Saved")
                         .foregroundStyle(.green)
                 }
             }
@@ -43,9 +46,11 @@ struct SettingsView: View {
             geminiKey = KeychainStore.read(.geminiAPIKey) ?? ""
             notionToken = KeychainStore.read(.notionToken) ?? ""
             databaseID = KeychainStore.read(.notionDatabaseID) ?? ""
+            githubToken = KeychainStore.read(.githubToken) ?? ""
         }
         .onChange(of: geminiKey) { saved = false }
         .onChange(of: notionToken) { saved = false }
         .onChange(of: databaseID) { saved = false }
+        .onChange(of: githubToken) { saved = false }
     }
 }

@@ -18,14 +18,18 @@ enum MarkdownBlocks {
         func flushSection() {
             defer { currentContentLines = [] }
             if let heading = currentHeading {
+                var payload: [String: Any] = [
+                    "rich_text": heading.richText,
+                    "is_toggleable": true,
+                ]
+                let children = contentBlocks(from: currentContentLines)
+                if !children.isEmpty {
+                    payload["children"] = children
+                }
                 topLevel.append([
                     "object": "block",
                     "type": heading.type,
-                    heading.type: [
-                        "rich_text": heading.richText,
-                        "is_toggleable": true,
-                        "children": contentBlocks(from: currentContentLines),
-                    ],
+                    heading.type: payload,
                 ])
             } else if !currentContentLines.isEmpty {
                 // Content before any heading: nothing to attach it to, so
@@ -53,8 +57,14 @@ enum MarkdownBlocks {
     }
 
     /// Renders bullet/paragraph lines (no headings) into blocks, with one
-    /// level of bullet nesting for indented lines — e.g. a vocabulary term
-    /// with an indented example sentence under it.
+    /// level of nesting for indented lines.
+    ///
+    /// For the Active Recall Mini-Quiz section, questions (bullets starting with
+    /// `**Q:**` or followed by an `Answer:` sub-bullet) are converted into Notion
+    /// `toggle` blocks, with the answer nested inside as a hidden child paragraph.
+    /// In Notion, this yields:
+    ///   heading_3 (is_toggleable: true) -> toggle (question) -> paragraph (answer)
+    /// which adheres to Notion API's 2-level nesting limit in a single request.
     private static func contentBlocks(from lines: [String]) -> [[String: Any]] {
         var blocks: [[String: Any]] = []
         var lastTopBulletIndex: Int?
@@ -65,26 +75,94 @@ enum MarkdownBlocks {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
             guard !line.isEmpty else { continue }
 
-            if line.hasPrefix("- ") || line.hasPrefix("* ") {
-                let text = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
-                let bullet: [String: Any] = [
-                    "object": "block",
-                    "type": "bulleted_list_item",
-                    "bulleted_list_item": ["rich_text": richText(from: text)],
-                ]
-                if indent >= 2, let parentIndex = lastTopBulletIndex {
+            let isBullet = line.hasPrefix("- ") || line.hasPrefix("* ")
+            let text = isBullet ? String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces) : line
+
+            if indent >= 2, let parentIndex = lastTopBulletIndex {
+                var parent = blocks[parentIndex]
+                let parentType = parent["type"] as? String ?? ""
+
+                if parentType == "toggle" {
+                    // Parent is already a question toggle block; append answer as paragraph child.
+                    var payload = parent["toggle"] as? [String: Any] ?? [:]
+                    var nested = payload["children"] as? [[String: Any]] ?? []
+                    let childBlock: [String: Any] = [
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": ["rich_text": richText(from: text)],
+                    ]
+                    nested.append(childBlock)
+                    payload["children"] = nested
+                    parent["toggle"] = payload
+                    blocks[parentIndex] = parent
+                } else if parentType == "bulleted_list_item", isAnswerBullet(text) {
+                    // Sub-bullet is an answer; convert parent bullet into a toggle block.
+                    let parentPayload = parent["bulleted_list_item"] as? [String: Any] ?? [:]
+                    let parentRichText = parentPayload["rich_text"] as? [[String: Any]] ?? []
+                    var nested = parentPayload["children"] as? [[String: Any]] ?? []
+
+                    // Any preexisting nested bullets flatten to paragraphs inside the toggle.
+                    nested = nested.map { child in
+                        if (child["type"] as? String) == "bulleted_list_item",
+                           let childPayload = child["bulleted_list_item"] as? [String: Any],
+                           let childRichText = childPayload["rich_text"] as? [[String: Any]] {
+                            return [
+                                "object": "block",
+                                "type": "paragraph",
+                                "paragraph": ["rich_text": childRichText],
+                            ]
+                        }
+                        return child
+                    }
+
+                    let answerBlock: [String: Any] = [
+                        "object": "block",
+                        "type": "paragraph",
+                        "paragraph": ["rich_text": richText(from: text)],
+                    ]
+                    nested.append(answerBlock)
+
+                    let toggleParent: [String: Any] = [
+                        "object": "block",
+                        "type": "toggle",
+                        "toggle": [
+                            "rich_text": parentRichText,
+                            "children": nested,
+                        ],
+                    ]
+                    blocks[parentIndex] = toggleParent
+                } else if parentType == "bulleted_list_item" {
                     // Nested bullet. Any depth flattens to one level: with
                     // the enclosing toggle heading that's already two
                     // levels of nested children, the most a single Notion
                     // create/append request reliably accepts.
-                    var parent = blocks[parentIndex]
-                    var payload = parent["bulleted_list_item"] as! [String: Any]
+                    var payload = parent["bulleted_list_item"] as? [String: Any] ?? [:]
                     var nested = payload["children"] as? [[String: Any]] ?? []
-                    nested.append(bullet)
+                    let childBlock: [String: Any] = [
+                        "object": "block",
+                        "type": isBullet ? "bulleted_list_item" : "paragraph",
+                        isBullet ? "bulleted_list_item" : "paragraph": ["rich_text": richText(from: text)],
+                    ]
+                    nested.append(childBlock)
                     payload["children"] = nested
                     parent["bulleted_list_item"] = payload
                     blocks[parentIndex] = parent
+                }
+            } else if isBullet {
+                if isQuestionBullet(text) {
+                    let toggle: [String: Any] = [
+                        "object": "block",
+                        "type": "toggle",
+                        "toggle": ["rich_text": richText(from: text)],
+                    ]
+                    blocks.append(toggle)
+                    lastTopBulletIndex = blocks.count - 1
                 } else {
+                    let bullet: [String: Any] = [
+                        "object": "block",
+                        "type": "bulleted_list_item",
+                        "bulleted_list_item": ["rich_text": richText(from: text)],
+                    ]
                     blocks.append(bullet)
                     lastTopBulletIndex = blocks.count - 1
                 }
@@ -98,6 +176,30 @@ enum MarkdownBlocks {
             }
         }
         return blocks
+    }
+
+    private static func isQuestionBullet(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        let lower = trimmed.lowercased()
+        return lower.hasPrefix("**q:**")
+            || lower.hasPrefix("**q**:")
+            || lower.hasPrefix("**q:")
+            || lower.hasPrefix("q:")
+            || lower.hasPrefix("**question:")
+            || lower.hasPrefix("question:")
+            || lower.hasPrefix("**question**:")
+    }
+
+    private static func isAnswerBullet(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        let lower = trimmed.lowercased()
+        return lower.hasPrefix("answer:")
+            || lower.hasPrefix("answer :")
+            || lower.hasPrefix("**answer:**")
+            || lower.hasPrefix("**answer**:")
+            || lower.hasPrefix("**answer:")
+            || lower.hasPrefix("a:")
+            || lower.hasPrefix("**a:**")
     }
 
     /// Splits text on **bold** markers into Notion rich_text elements,

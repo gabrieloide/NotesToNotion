@@ -5,6 +5,8 @@ final class RecordingManager {
     private var micRecorder: AVAudioRecorder?
     private var systemAudioRecorder: SystemAudioRecorder?
     private var systemAudioURL: URL?
+    private(set) var isCapturingSystemAudio: Bool = false
+    private(set) var isPaused: Bool = false
 
     func start() async throws {
         try await ensureMicrophonePermission()
@@ -22,24 +24,68 @@ final class RecordingManager {
         ]
 
         let recorder = try AVAudioRecorder(url: micURL, settings: settings)
-        guard recorder.record() else {
-            throw AppError.recordingFailed("the microphone didn't start recording.")
-        }
-        self.micRecorder = recorder
+        recorder.isMeteringEnabled = true
+        isPaused = false
 
-        // System audio (the other side of a video call) is best-effort: a
-        // denied Screen Recording permission shouldn't block recording, it
-        // just means the note ends up mic-only.
+        // Start system audio capture before or simultaneously with the microphone
+        // so startHostTime aligns with the microphone start.
         let systemURL = AudioStore.newRecordingURL(name: "system-\(timestamp).caf")
         let systemRecorder = SystemAudioRecorder(fileURL: systemURL)
         do {
             try await systemRecorder.start()
             self.systemAudioRecorder = systemRecorder
             self.systemAudioURL = systemURL
+            self.isCapturingSystemAudio = true
         } catch {
+            print("WARN: System audio capture unavailable: \(error)")
             self.systemAudioRecorder = nil
             self.systemAudioURL = nil
+            self.isCapturingSystemAudio = false
         }
+
+        guard recorder.record() else {
+            if let systemAudioRecorder {
+                await systemAudioRecorder.stop()
+                self.systemAudioRecorder = nil
+                self.systemAudioURL = nil
+                self.isCapturingSystemAudio = false
+            }
+            throw AppError.recordingFailed("the microphone didn't start recording.")
+        }
+        self.micRecorder = recorder
+    }
+
+    func pause() {
+        guard !isPaused else { return }
+        micRecorder?.pause()
+        systemAudioRecorder?.pause()
+        isPaused = true
+    }
+
+    func resume() {
+        guard isPaused else { return }
+        micRecorder?.record()
+        systemAudioRecorder?.resume()
+        isPaused = false
+    }
+
+    func currentLevels() -> (mic: Float, system: Float) {
+        guard !isPaused, let micRecorder, micRecorder.isRecording else {
+            return (mic: 0.0, system: 0.0)
+        }
+        micRecorder.updateMeters()
+        let averagePower = micRecorder.averagePower(forChannel: 0)
+        let minDb: Float = -50.0
+        let micLevel = max(0.0, min(1.0, (averagePower - minDb) / (0.0 - minDb)))
+
+        let systemLevel: Float
+        if isCapturingSystemAudio, let sysRecorder = systemAudioRecorder {
+            systemLevel = sysRecorder.currentLevel
+        } else {
+            systemLevel = 0.0
+        }
+
+        return (mic: micLevel, system: systemLevel)
     }
 
     private func fileSize(_ url: URL) -> Int {
@@ -47,6 +93,8 @@ final class RecordingManager {
     }
 
     func stop() async -> URL? {
+        isPaused = false
+        isCapturingSystemAudio = false
         guard let micRecorder else { return nil }
         let micURL = micRecorder.url
         micRecorder.stop()

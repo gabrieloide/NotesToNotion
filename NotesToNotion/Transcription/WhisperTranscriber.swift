@@ -1,3 +1,5 @@
+import Accelerate
+import AVFoundation
 import Foundation
 import WhisperKit
 
@@ -18,16 +20,14 @@ actor WhisperTranscriber {
 
     private var pipeline: WhisperKit?
 
+    private struct LabeledSegment {
+        let speaker: String
+        let start: Float
+        let text: String
+    }
+
     func transcribe(audioURL: URL) async throws -> String {
         let pipeline = try await loadedPipeline()
-
-        // Load as 16 kHz float samples and level-normalize before decoding.
-        // The mic-only fallback records ~10 dB quieter than the mixed track
-        // (it applies no makeup gain), and WhisperKit treats very quiet
-        // input as marginal — which pushes the decoder into the failure
-        // modes below. Normalizing here fixes both recording paths at once.
-        let samples = try AudioProcessor.loadAudioAsFloatArray(fromPath: audioURL.path)
-        let normalized = Self.peakNormalized(samples)
 
         // Deterministic greedy decoding. WhisperKit's default
         // `temperatureFallbackCount` re-decodes any segment that fails its
@@ -43,19 +43,151 @@ actor WhisperTranscriber {
             logProbThreshold: nil
         )
 
+        let isMixed = audioURL.lastPathComponent.hasPrefix("mixed-")
+        let channelCount = (try? AVAudioFile(forReading: audioURL))?.processingFormat.channelCount ?? 1
+
+        if isMixed && channelCount == 2 {
+            return try await transcribeDualChannel(audioURL: audioURL, pipeline: pipeline, options: options)
+        } else {
+            return try await transcribeSingleChannel(audioURL: audioURL, pipeline: pipeline, options: options)
+        }
+    }
+
+    private func transcribeDualChannel(
+        audioURL: URL,
+        pipeline: WhisperKit,
+        options: DecodingOptions
+    ) async throws -> String {
+        // Channel 0 = Left = Estudiante (Mic)
+        // Channel 1 = Right = Sensei (System Audio)
+        let studentSamples = try AudioProcessor.loadAudioAsFloatArray(
+            fromPath: audioURL.path,
+            channelMode: .specificChannel(0)
+        )
+        let senseiSamples = try AudioProcessor.loadAudioAsFloatArray(
+            fromPath: audioURL.path,
+            channelMode: .specificChannel(1)
+        )
+
+        let studentHasVoice = Self.hasVoiceEnergy(studentSamples)
+        let senseiHasVoice = Self.hasVoiceEnergy(senseiSamples)
+
+        guard studentHasVoice || senseiHasVoice else {
+            return ""
+        }
+
+        var labeledSegments: [LabeledSegment] = []
+
+        if senseiHasVoice {
+            let normalizedSensei = Self.peakNormalized(senseiSamples)
+            let senseiResults = try await pipeline.transcribe(audioArray: normalizedSensei, decodeOptions: options)
+            for segment in senseiResults.flatMap(\.segments) {
+                let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if Self.isValidSegmentText(text) {
+                    labeledSegments.append(LabeledSegment(speaker: "Sensei", start: segment.start, text: text))
+                }
+            }
+        }
+
+        if studentHasVoice {
+            let normalizedStudent = Self.peakNormalized(studentSamples)
+            let studentResults = try await pipeline.transcribe(audioArray: normalizedStudent, decodeOptions: options)
+            for segment in studentResults.flatMap(\.segments) {
+                let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if Self.isValidSegmentText(text) {
+                    labeledSegments.append(LabeledSegment(speaker: "Estudiante", start: segment.start, text: text))
+                }
+            }
+        }
+
+        guard !labeledSegments.isEmpty else {
+            return ""
+        }
+
+        labeledSegments.sort { $0.start < $1.start }
+
+        var lines: [String] = []
+        for segment in labeledSegments {
+            let timestamp = Self.formatTimestamp(segment.start)
+            lines.append("[\(timestamp) \(segment.speaker)]: \(segment.text)")
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private func transcribeSingleChannel(
+        audioURL: URL,
+        pipeline: WhisperKit,
+        options: DecodingOptions
+    ) async throws -> String {
+        let samples = try AudioProcessor.loadAudioAsFloatArray(fromPath: audioURL.path)
+        guard Self.hasVoiceEnergy(samples) else {
+            return ""
+        }
+
+        let normalized = Self.peakNormalized(samples)
         let results = try await pipeline.transcribe(audioArray: normalized, decodeOptions: options)
-        return results.map(\.text).joined(separator: " ")
+        let segments = results.flatMap(\.segments)
+
+        var lines: [String] = []
+        for segment in segments {
+            let text = segment.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if Self.isValidSegmentText(text) {
+                let timestamp = Self.formatTimestamp(segment.start)
+                lines.append("[\(timestamp)]: \(text)")
+            }
+        }
+
+        if lines.isEmpty {
+            let fullText = results.map(\.text).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !fullText.isEmpty {
+                return "[00:00]: \(fullText)"
+            }
+            return ""
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private static func hasVoiceEnergy(_ samples: [Float], threshold: Float = 0.015) -> Bool {
+        guard !samples.isEmpty else { return false }
+        var peak: Float = 0.0
+        vDSP_maxmgv(samples, 1, &peak, vDSP_Length(samples.count))
+        return peak > threshold
     }
 
     /// Scales the whole signal so its loudest sample sits near full scale,
     /// leaving audio that's already loud enough (or effectively silent)
     /// untouched so we neither clip nor amplify pure noise.
     private static func peakNormalized(_ samples: [Float]) -> [Float] {
-        let peak = samples.map(abs).max() ?? 0
+        guard !samples.isEmpty else { return samples }
+        var peak: Float = 0.0
+        vDSP_maxmgv(samples, 1, &peak, vDSP_Length(samples.count))
         let target: Float = 0.95
         guard peak > 0.01, peak < target else { return samples }
         let gain = target / peak
-        return samples.map { $0 * gain }
+        var output = [Float](repeating: 0, count: samples.count)
+        var gainVar = gain
+        vDSP_vsmul(samples, 1, &gainVar, &output, 1, vDSP_Length(samples.count))
+        return output
+    }
+
+    private static func formatTimestamp(_ seconds: Float) -> String {
+        let totalSeconds = max(0, Int(seconds.rounded(.down)))
+        let minutes = totalSeconds / 60
+        let secs = totalSeconds % 60
+        return String(format: "%02d:%02d", minutes, secs)
+    }
+
+    private static func isValidSegmentText(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let stripped = trimmed.trimmingCharacters(
+            in: CharacterSet.punctuationCharacters
+                .union(.whitespacesAndNewlines)
+                .union(CharacterSet(charactersIn: "♪♫-—_~…[]()"))
+        )
+        return !stripped.isEmpty
     }
 
     private func loadedPipeline() async throws -> WhisperKit {

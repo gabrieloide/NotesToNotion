@@ -10,24 +10,34 @@ struct MenuBarView: View {
             switch appState.phase {
             case .idle:
                 if appState.hasCredentials {
-                    Button("Start Recording") { appState.startRecording() }
+                    Button("Start Recording (⌘⇧R)") { appState.startRecording() }
                 } else {
                     Text("Set up your API keys to get started")
                 }
 
             case .recording:
-                Text("Recording… \(appState.formattedElapsed)")
-                Button("Stop & Save") { appState.stopAndProcess() }
+                Text(appState.isCapturingSystemAudio
+                    ? "Recording (Mic + System)… \(appState.formattedElapsed)"
+                    : "Recording (Mic Only - Check Screen Recording Permission)… \(appState.formattedElapsed)")
+                Button(appState.isPaused ? "Resume Recording (⌘⇧P)" : "Pause Recording (⌘⇧P)") {
+                    appState.togglePause()
+                }
+                Button("Bookmark Moment (⌘⇧M)") {
+                    appState.addBookmark()
+                }
+                Button("Stop & Save (⌘⇧R)") {
+                    appState.stopAndProcess()
+                }
 
             case .processing(let status):
                 Text(status)
 
             case .success(let pageURL):
-                Text("Saved to Notion ✓")
+                Text("Saved to Notion")
                 if let pageURL {
                     Button("Open in Notion") { NSWorkspace.shared.open(pageURL) }
                 }
-                Button("New Recording") { appState.startRecording() }
+                Button("New Recording (⌘⇧R)") { appState.startRecording() }
                 Button("Done") { appState.reset() }
 
             case .error(let message):

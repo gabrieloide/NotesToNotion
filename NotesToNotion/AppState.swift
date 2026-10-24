@@ -1,6 +1,8 @@
 import AppKit
 import Foundation
+import IOKit.pwr_mgt
 import Observation
+import UserNotifications
 
 @Observable
 @MainActor
@@ -13,9 +15,24 @@ final class AppState {
         case error(String)
     }
 
-    var phase: Phase = .idle
+    var phase: Phase = .idle {
+        didSet {
+            switch phase {
+            case .recording, .processing:
+                acquireSleepAssertions()
+            case .idle, .success, .error:
+                releaseSleepAssertions()
+            }
+        }
+    }
     var elapsedSeconds = 0
     var hasCredentials: Bool
+    var isCapturingSystemAudio: Bool = true
+    var isPaused: Bool = false
+    var bookmarks: [Int] = []
+    var micLevel: Float = 0.0
+    var systemLevel: Float = 0.0
+
     /// A Gemini result that made it through transcription but hasn't been
     /// confirmed saved to Notion yet — either from this session's last
     /// failure, or recovered from disk after the app quit mid-flow.
@@ -28,18 +45,40 @@ final class AppState {
 
     private let recorder = RecordingManager()
     private var timer: Timer?
+    private var meterTimer: Timer?
 
+    private var activityToken: NSObjectProtocol?
+    private var powerAssertionID: IOPMAssertionID = 0
+    private var isProcessingInFlight: Bool = false
+    private var shouldAutoResumeOnWake: Bool = false
+
+    private static let bookmarksKey = "pending_bookmarks"
     // Safety cap for recordings left running by accident.
     private static let maxRecordingSeconds = 60 * 60
 
     init() {
         hasCredentials = Self.credentialsPresent()
+        if let savedBookmarks = UserDefaults.standard.array(forKey: Self.bookmarksKey) as? [Int] {
+            bookmarks = savedBookmarks
+        }
         if let recovered = PendingNoteStore.loadOldest() {
             pendingNote = recovered
             phase = .error("Found a note from a previous session that wasn't saved to Notion yet.")
         } else if let recoveredAudio = AudioStore.loadOldest() {
             pendingAudioURL = recoveredAudio
             phase = .error("Found a recording from a previous session that wasn't transcribed yet.")
+        }
+
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.handleWakeNotification()
+            }
         }
     }
 
@@ -62,7 +101,29 @@ final class AppState {
     }
 
     func reset() {
+        shouldAutoResumeOnWake = false
         phase = .idle
+    }
+
+    func togglePause() {
+        guard phase == .recording else { return }
+        isPaused.toggle()
+        if isPaused {
+            recorder.pause()
+            micLevel = 0.0
+            systemLevel = 0.0
+        } else {
+            recorder.resume()
+        }
+    }
+
+    func addBookmark() {
+        guard phase == .recording else { return }
+        guard !bookmarks.contains(elapsedSeconds) else { return }
+        bookmarks.append(elapsedSeconds)
+        bookmarks.sort()
+        UserDefaults.standard.set(bookmarks, forKey: Self.bookmarksKey)
+        NSSound(named: "Tink")?.play()
     }
 
     func startRecording() {
@@ -70,9 +131,16 @@ final class AppState {
             phase = .error(AppError.missingCredentials.localizedDescription)
             return
         }
+        bookmarks = []
+        UserDefaults.standard.removeObject(forKey: Self.bookmarksKey)
+        isPaused = false
+        micLevel = 0.0
+        systemLevel = 0.0
+
         Task {
             do {
                 try await recorder.start()
+                isCapturingSystemAudio = recorder.isCapturingSystemAudio
                 elapsedSeconds = 0
                 phase = .recording
                 startTimer()
@@ -85,6 +153,13 @@ final class AppState {
     func stopAndProcess() {
         timer?.invalidate()
         timer = nil
+        meterTimer?.invalidate()
+        meterTimer = nil
+        micLevel = 0.0
+        systemLevel = 0.0
+        isPaused = false
+        UserDefaults.standard.set(bookmarks, forKey: Self.bookmarksKey)
+
         Task {
             guard let audioURL = await recorder.stop() else {
                 phase = .error("Couldn't save the recorded audio.")
@@ -95,23 +170,37 @@ final class AppState {
     }
 
     private func startTimer() {
+        timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.phase == .recording else { return }
-                self.elapsedSeconds += 1
-                if self.elapsedSeconds >= Self.maxRecordingSeconds {
-                    self.stopAndProcess()
+                if !self.isPaused {
+                    self.elapsedSeconds += 1
+                    if self.elapsedSeconds >= Self.maxRecordingSeconds {
+                        self.stopAndProcess()
+                    }
+                }
+            }
+        }
+
+        meterTimer?.invalidate()
+        meterTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.phase == .recording else { return }
+                if self.isPaused {
+                    self.micLevel = 0.0
+                    self.systemLevel = 0.0
+                } else {
+                    let levels = self.recorder.currentLevels()
+                    self.micLevel = levels.mic
+                    self.systemLevel = levels.system
                 }
             }
         }
     }
 
     private func process(audioURL: URL) async {
-        // RecordingManager already wrote this file directly into AudioStore's
-        // durable location (see AudioStore.newRecordingURL), so it's safe
-        // from a temp-dir sweep or a crash from the moment recording
-        // started. It's only deleted once the transcript is durably
-        // persisted below.
+        shouldAutoResumeOnWake = true
         pendingAudioURL = audioURL
         await transcribeAndSummarize(audioURL: audioURL)
     }
@@ -125,6 +214,12 @@ final class AppState {
         guard phase == .recording else { return }
         timer?.invalidate()
         timer = nil
+        meterTimer?.invalidate()
+        meterTimer = nil
+        micLevel = 0.0
+        systemLevel = 0.0
+        isPaused = false
+        UserDefaults.standard.set(bookmarks, forKey: Self.bookmarksKey)
         guard let audioURL = await recorder.stop() else { return }
         pendingAudioURL = audioURL
     }
@@ -134,6 +229,10 @@ final class AppState {
     /// by `retryTranscription()` for audio recovered from a previous
     /// failure.
     private func transcribeAndSummarize(audioURL: URL) async {
+        guard !isProcessingInFlight else { return }
+        isProcessingInFlight = true
+        defer { isProcessingInFlight = false }
+
         do {
             guard let geminiKey = KeychainStore.read(.geminiAPIKey) else {
                 throw AppError.missingCredentials
@@ -159,9 +258,13 @@ final class AppState {
             AudioStore.delete(audioURL)
             pendingAudioURL = nil
 
+            let currentBookmarks = bookmarks.isEmpty
+                ? (UserDefaults.standard.array(forKey: Self.bookmarksKey) as? [Int] ?? [])
+                : bookmarks
+
             phase = .processing("Generating study notes with Gemini…")
             let gemini = GeminiClient(apiKey: geminiKey)
-            let (title, overview, notes) = try await gemini.summarize(transcript: trimmedTranscript)
+            let (title, overview, notes) = try await gemini.summarize(transcript: trimmedTranscript, bookmarks: currentBookmarks)
 
             let fullResult = GeminiResult(
                 transcript: trimmedTranscript,
@@ -176,22 +279,32 @@ final class AppState {
 
             try await saveToNotion(note)
         } catch AppError.noSpeechDetected {
-            // Genuinely no usable audio either way — nothing left worth
-            // keeping around to retry.
             AudioStore.delete(audioURL)
             pendingAudioURL = nil
+            bookmarks = []
+            UserDefaults.standard.removeObject(forKey: Self.bookmarksKey)
+            shouldAutoResumeOnWake = false
             phase = .error(Self.message(for: AppError.noSpeechDetected))
         } catch {
-            // Deliberately NOT deleting the audio here: whatever failed
-            // (missing credentials, WhisperKit itself, a crash) happened
-            // before the transcript was durably saved, so pendingAudioURL
-            // keeps pointing at the recording for retryTranscription().
             phase = .error(Self.message(for: error))
+            if isNetworkError(error) && shouldAutoResumeOnWake {
+                print("Network error detected during transcription/summarization. Will retry in 3 seconds…")
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    guard let self, self.shouldAutoResumeOnWake, !self.isProcessingInFlight else { return }
+                    if self.pendingNote != nil {
+                        self.retryPendingNote()
+                    } else if self.pendingAudioURL != nil {
+                        self.retryTranscription()
+                    }
+                }
+            }
         }
     }
 
     func retryTranscription() {
         guard let audioURL = pendingAudioURL else { return }
+        shouldAutoResumeOnWake = true
         Task {
             await transcribeAndSummarize(audioURL: audioURL)
         }
@@ -201,12 +314,20 @@ final class AppState {
         guard let audioURL = pendingAudioURL else { return }
         AudioStore.delete(audioURL)
         pendingAudioURL = nil
+        bookmarks = []
+        UserDefaults.standard.removeObject(forKey: Self.bookmarksKey)
+        shouldAutoResumeOnWake = false
         phase = .idle
     }
 
     func retryPendingNote() {
         guard let note = pendingNote else { return }
+        guard !isProcessingInFlight else { return }
+        shouldAutoResumeOnWake = true
+        isProcessingInFlight = true
+
         Task {
+            defer { isProcessingInFlight = false }
             do {
                 guard let geminiKey = KeychainStore.read(.geminiAPIKey) else {
                     throw AppError.missingCredentials
@@ -216,7 +337,10 @@ final class AppState {
                 if updatedNote.result.notes == nil || updatedNote.result.notes?.isEmpty == true {
                     phase = .processing("Generating study notes with Gemini…")
                     let gemini = GeminiClient(apiKey: geminiKey)
-                    let (title, overview, notes) = try await gemini.summarize(transcript: updatedNote.result.transcript)
+                    let currentBookmarks = bookmarks.isEmpty
+                        ? (UserDefaults.standard.array(forKey: Self.bookmarksKey) as? [Int] ?? [])
+                        : bookmarks
+                    let (title, overview, notes) = try await gemini.summarize(transcript: updatedNote.result.transcript, bookmarks: currentBookmarks)
                     let fullResult = GeminiResult(
                         transcript: updatedNote.result.transcript,
                         summary: overview,
@@ -232,6 +356,16 @@ final class AppState {
                 try await saveToNotion(updatedNote)
             } catch {
                 phase = .error(Self.message(for: error))
+                if isNetworkError(error) && shouldAutoResumeOnWake {
+                    print("Network error detected during note retry. Will retry in 3 seconds…")
+                    Task { @MainActor [weak self] in
+                        try? await Task.sleep(nanoseconds: 3_000_000_000)
+                        guard let self, self.shouldAutoResumeOnWake, !self.isProcessingInFlight else { return }
+                        if self.pendingNote != nil {
+                            self.retryPendingNote()
+                        }
+                    }
+                }
             }
         }
     }
@@ -257,7 +391,10 @@ final class AppState {
 
                 PendingNoteStore.delete(id: note.id)
                 pendingNote = nil
-                phase = .success(pageURL)
+                bookmarks = []
+                UserDefaults.standard.removeObject(forKey: Self.bookmarksKey)
+                shouldAutoResumeOnWake = false
+                notifySuccess(pageURL: pageURL)
             } catch {
                 phase = .error(Self.message(for: error))
             }
@@ -268,6 +405,9 @@ final class AppState {
         guard let note = pendingNote else { return }
         PendingNoteStore.delete(id: note.id)
         pendingNote = nil
+        bookmarks = []
+        UserDefaults.standard.removeObject(forKey: Self.bookmarksKey)
+        shouldAutoResumeOnWake = false
         phase = .idle
     }
 
@@ -287,9 +427,93 @@ final class AppState {
             transcript: note.result.transcript
         )
 
+        if let githubToken = KeychainStore.read(.githubToken), !githubToken.isEmpty {
+            phase = .processing("Syncing session to Obsidian vault…")
+            do {
+                let obsidian = ObsidianClient(token: githubToken)
+                try await obsidian.recordClassSession(
+                    title: note.result.title,
+                    overview: note.result.summary,
+                    notesMarkdown: note.result.notes,
+                    notionURL: pageURL
+                )
+            } catch {
+                print("WARN: Obsidian sync failed: \(error)")
+            }
+        }
+
         PendingNoteStore.delete(id: note.id)
         pendingNote = nil
+        bookmarks = []
+        UserDefaults.standard.removeObject(forKey: Self.bookmarksKey)
+        shouldAutoResumeOnWake = false
+        notifySuccess(pageURL: pageURL)
+    }
+
+    private func notifySuccess(pageURL: URL?) {
         phase = .success(pageURL)
+        NSSound(named: "Glass")?.play()
+
+        let content = UNMutableNotificationContent()
+        content.title = "KoeNotes: Class Notes Saved"
+        content.body = "Your study notes, corrections, and quiz are ready in Notion."
+        let request = UNNotificationRequest(
+            identifier: UUID().uuidString,
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    // MARK: - Power Assertion & Sleep Management
+
+    private func acquireSleepAssertions() {
+        if activityToken == nil {
+            activityToken = ProcessInfo.processInfo.beginActivity(
+                options: [.idleSystemSleepDisabled, .suddenTerminationDisabled, .userInitiated],
+                reason: "Recording and transcribing Japanese class"
+            )
+        }
+        if powerAssertionID == 0 {
+            let reason = "NotesToNotion transcribing and saving class notes" as CFString
+            let type = kIOPMAssertionTypePreventUserIdleSystemSleep as CFString
+            let level = IOPMAssertionLevel(kIOPMAssertionLevelOn)
+            _ = IOPMAssertionCreateWithName(type, level, reason, &powerAssertionID)
+        }
+    }
+
+    private func releaseSleepAssertions() {
+        if let token = activityToken {
+            ProcessInfo.processInfo.endActivity(token)
+            activityToken = nil
+        }
+        if powerAssertionID != 0 {
+            IOPMAssertionRelease(powerAssertionID)
+            powerAssertionID = 0
+        }
+    }
+
+    private func handleWakeNotification() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard !self.isProcessingInFlight else { return }
+            if self.shouldAutoResumeOnWake || self.pendingAudioURL != nil || self.pendingNote != nil {
+                if self.pendingNote != nil {
+                    self.retryPendingNote()
+                } else if self.pendingAudioURL != nil {
+                    self.retryTranscription()
+                }
+            }
+        }
+    }
+
+    private func isNetworkError(_ error: Error) -> Bool {
+        if error is URLError { return true }
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain { return true }
+        if case AppError.geminiOverloaded = error { return true }
+        return false
     }
 
     private static func credentialsPresent() -> Bool {
