@@ -182,9 +182,11 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
 
         if audioFile == nil {
             do {
+                var fileSettings = pcmBuffer.format.settings
+                fileSettings[AVLinearPCMIsNonInterleaved] = false
                 audioFile = try AVAudioFile(
                     forWriting: fileURL,
-                    settings: pcmBuffer.format.settings,
+                    settings: fileSettings,
                     commonFormat: pcmBuffer.format.commonFormat,
                     interleaved: pcmBuffer.format.isInterleaved
                 )
