@@ -22,7 +22,26 @@ struct RecordingIndicatorView: View {
                 // Audio level meters for You & Sensei
                 HStack(spacing: 8) {
                     LevelMeter(label: "You", level: appState.micLevel, color: .green)
-                    LevelMeter(label: "Sensei", level: appState.systemLevel, color: .blue)
+                    if appState.isCapturingSystemAudio {
+                        LevelMeter(label: "Sensei", level: appState.systemLevel, color: .blue)
+                    } else {
+                        Button {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.yellow)
+                                Text("Enable Sensei Audio")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                        .help("Abrir Configuración del Sistema para conceder permiso de Grabación de Pantalla")
+                    }
                 }
 
                 // Action buttons: Bookmark, Pause/Resume, Stop

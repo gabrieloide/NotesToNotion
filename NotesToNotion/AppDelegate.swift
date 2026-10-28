@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         UNUserNotificationCenter.current().delegate = self
+        LiveSenseiTest.runIfNeeded()
     }
 
     nonisolated func userNotificationCenter(

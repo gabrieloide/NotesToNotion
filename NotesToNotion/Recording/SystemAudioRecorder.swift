@@ -1,16 +1,24 @@
 import Accelerate
+import AudioToolbox
 import AVFoundation
+import CoreAudio
 import CoreGraphics
 import CoreMedia
 import os
 import ScreenCaptureKit
 
 /// Captures the Mac's system audio output (e.g. the other side of a video
-/// call) independently of the microphone, via ScreenCaptureKit.
-///
-/// This is best-effort: if Screen Recording permission is missing or denied,
-/// callers should fall back to mic-only audio rather than block recording.
+/// call) independently of the microphone, using a Dual-Engine architecture:
+/// 1. Primary engine: CoreAudio Process Tap (CATapDescription), capturing system audio
+///    directly at the HAL level without requiring kTCCServiceScreenCapture.
+/// 2. Secondary fallback engine: ScreenCaptureKit (SCStream).
 final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+    private enum Engine {
+        case coreAudioTap(tapID: AudioObjectID, aggregateID: AudioObjectID, procID: AudioDeviceIOProcID)
+        case screenCaptureKit(stream: SCStream)
+    }
+
+    private var activeEngine: Engine?
     private var stream: SCStream?
     private var audioFile: AVAudioFile?
     private var recordedFormat: AVAudioFormat?
@@ -46,11 +54,200 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
     }
 
     func start() async throws {
-        // Only request permission if not already granted to avoid repeated prompts
-        if !CGPreflightScreenCaptureAccess() {
-            guard CGRequestScreenCaptureAccess() else {
-                throw AppError.recordingFailed("Screen Recording permission denied for system audio.")
+        // 1. Intentar primero con CoreAudio Process Tap (CATapDescription) en el HAL (macOS 14.2+)
+        if #available(macOS 14.2, *) {
+            do {
+                try startCoreAudioProcessTap()
+                print("SystemAudioRecorder: started via CoreAudio Process Tap (HAL)")
+                return
+            } catch {
+                print("WARN: CoreAudio Process Tap unavailable (\(error)), falling back to ScreenCaptureKit...")
             }
+        }
+
+        // 2. Fallback a ScreenCaptureKit
+        try await startScreenCaptureKit()
+        print("SystemAudioRecorder: started via ScreenCaptureKit fallback")
+    }
+
+    // MARK: - CoreAudio Process Tap (Primary Engine)
+
+    @available(macOS 14.2, *)
+    private func startCoreAudioProcessTap() throws {
+        let tapDescription = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+        var tapID: AudioObjectID = 0
+        var status = AudioHardwareCreateProcessTap(tapDescription, &tapID)
+        guard status == noErr else {
+            throw AppError.recordingFailed("AudioHardwareCreateProcessTap failed with code \(status)")
+        }
+
+        // Leer el dispositivo de salida por defecto del sistema
+        var defaultOutputDeviceID = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        status = AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &defaultOutputDeviceID)
+        guard status == noErr else {
+            AudioHardwareDestroyProcessTap(tapID)
+            throw AppError.recordingFailed("Failed to get default output device: \(status)")
+        }
+
+        // Leer UID del dispositivo de salida
+        address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var uidCF: CFString?
+        size = UInt32(MemoryLayout<CFString?>.size)
+        withUnsafeMutablePointer(to: &uidCF) { ptr in
+            status = AudioObjectGetPropertyData(defaultOutputDeviceID, &address, 0, nil, &size, ptr)
+        }
+        guard status == noErr, let outputUID = uidCF as String? else {
+            AudioHardwareDestroyProcessTap(tapID)
+            throw AppError.recordingFailed("Failed to read output device UID")
+        }
+
+        let aggregateUID = UUID().uuidString
+        let description: [String: Any] = [
+            kAudioAggregateDeviceNameKey: "NotesToNotionTapAggregate",
+            kAudioAggregateDeviceUIDKey: aggregateUID,
+            kAudioAggregateDeviceMainSubDeviceKey: outputUID,
+            kAudioAggregateDeviceIsPrivateKey: true,
+            kAudioAggregateDeviceIsStackedKey: false,
+            kAudioAggregateDeviceTapAutoStartKey: true,
+            kAudioAggregateDeviceSubDeviceListKey: [
+                [kAudioSubDeviceUIDKey: outputUID]
+            ],
+            kAudioAggregateDeviceTapListKey: [
+                [
+                    kAudioSubTapDriftCompensationKey: true,
+                    kAudioSubTapUIDKey: tapDescription.uuid.uuidString
+                ]
+            ]
+        ]
+
+        var aggregateDeviceID: AudioObjectID = 0
+        status = AudioHardwareCreateAggregateDevice(description as CFDictionary, &aggregateDeviceID)
+        guard status == noErr else {
+            AudioHardwareDestroyProcessTap(tapID)
+            throw AppError.recordingFailed("AudioHardwareCreateAggregateDevice failed: \(status)")
+        }
+
+        // Obtener formato de audio del aggregate device
+        var formatAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamFormat,
+            mScope: kAudioObjectPropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var asbd = AudioStreamBasicDescription()
+        var asbdSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        status = AudioObjectGetPropertyData(aggregateDeviceID, &formatAddress, 0, nil, &asbdSize, &asbd)
+        guard status == noErr, let avFormat = AVAudioFormat(streamDescription: &asbd) else {
+            AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
+            AudioHardwareDestroyProcessTap(tapID)
+            throw AppError.recordingFailed("Failed to get aggregate stream format")
+        }
+
+        var fileSettings = avFormat.settings
+        fileSettings[AVLinearPCMIsNonInterleaved] = false
+        let file = try AVAudioFile(
+            forWriting: fileURL,
+            settings: fileSettings,
+            commonFormat: avFormat.commonFormat,
+            interleaved: avFormat.isInterleaved
+        )
+
+        let startTime = CMClockGetTime(CMClockGetHostTimeClock())
+        writeQueue.sync {
+            self.audioFile = file
+            self.recordedFormat = avFormat
+            self.startHostTime = startTime
+            self.nextExpectedSampleTime = startTime
+            self.isPaused = false
+            self.pauseStartHostTime = nil
+        }
+
+        levelState.withLock { state in
+            state.currentLevel = 0.0
+            state.lastBufferDate = Date()
+            state.isPaused = false
+        }
+
+        let rawSelf = Unmanaged.passUnretained(self).toOpaque()
+        var procID: AudioDeviceIOProcID?
+        status = AudioDeviceCreateIOProcID(aggregateDeviceID, { (deviceID, inNow, inInputData, inInputTime, outOutputData, inOutputTime, inClientData) -> OSStatus in
+            guard let inClientData else { return noErr }
+            let recorder = Unmanaged<SystemAudioRecorder>.fromOpaque(inClientData).takeUnretainedValue()
+            recorder.handleTapAudio(inInputData: inInputData)
+            return noErr
+        }, rawSelf, &procID)
+
+        guard status == noErr, let procID else {
+            AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
+            AudioHardwareDestroyProcessTap(tapID)
+            throw AppError.recordingFailed("AudioDeviceCreateIOProcID failed: \(status)")
+        }
+
+        status = AudioDeviceStart(aggregateDeviceID, procID)
+        guard status == noErr else {
+            AudioDeviceDestroyIOProcID(aggregateDeviceID, procID)
+            AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
+            AudioHardwareDestroyProcessTap(tapID)
+            throw AppError.recordingFailed("AudioDeviceStart failed: \(status)")
+        }
+
+        self.activeEngine = .coreAudioTap(tapID: tapID, aggregateID: aggregateDeviceID, procID: procID)
+    }
+
+    private func handleTapAudio(inInputData: UnsafePointer<AudioBufferList>) {
+        guard !isPaused else { return }
+        guard let format = recordedFormat else { return }
+
+        let ablPointer = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inInputData))
+        guard let firstBuffer = ablPointer.first, firstBuffer.mDataByteSize > 0 else { return }
+
+        let bytesPerFrame = format.streamDescription.pointee.mBytesPerFrame
+        guard bytesPerFrame > 0 else { return }
+        let frameCount = AVAudioFrameCount(firstBuffer.mDataByteSize / bytesPerFrame)
+        guard frameCount > 0 else { return }
+
+        guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else { return }
+        pcmBuffer.frameLength = frameCount
+
+        let dstPointer = UnsafeMutableAudioBufferListPointer(pcmBuffer.mutableAudioBufferList)
+        for i in 0..<min(ablPointer.count, dstPointer.count) {
+            let src = ablPointer[i]
+            if let srcData = src.mData, let dstData = dstPointer[i].mData {
+                dstData.copyMemory(from: srcData, byteCount: Int(src.mDataByteSize))
+                dstPointer[i].mDataByteSize = src.mDataByteSize
+            }
+        }
+
+        let level = calculateLevel(from: pcmBuffer)
+        levelState.withLock { state in
+            state.currentLevel = level
+            state.lastBufferDate = Date()
+        }
+
+        writeQueue.async {
+            guard !self.isPaused, let file = self.audioFile else { return }
+            do {
+                try file.write(from: pcmBuffer)
+            } catch {
+                print("ERROR writing system audio tap: \(error)")
+            }
+        }
+    }
+
+    // MARK: - ScreenCaptureKit (Fallback Engine)
+
+    private func startScreenCaptureKit() async throws {
+        if !CGPreflightScreenCaptureAccess() {
+            _ = CGRequestScreenCaptureAccess()
         }
 
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -64,7 +261,6 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
         config.excludesCurrentProcessAudio = true
         config.sampleRate = 48000
         config.channelCount = 1
-        // Audio only: keep the unused video side of the stream as cheap as possible.
         config.width = 2
         config.height = 2
         config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
@@ -75,6 +271,7 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
 
         try await stream.startCapture()
         self.stream = stream
+        self.activeEngine = .screenCaptureKit(stream: stream)
 
         let startTime = CMClockGetTime(CMClockGetHostTimeClock())
         writeQueue.sync {
@@ -90,6 +287,8 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
             state.isPaused = false
         }
     }
+
+    // MARK: - Control and Lifecycle
 
     func synchronizeStartTime() {
         let now = CMClockGetTime(CMClockGetHostTimeClock())
@@ -133,9 +332,22 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
     }
 
     func stop() async {
-        if let stream {
+        switch activeEngine {
+        case .coreAudioTap(let tapID, let aggID, let procID):
+            AudioDeviceStop(aggID, procID)
+            AudioDeviceDestroyIOProcID(aggID, procID)
+            AudioHardwareDestroyAggregateDevice(aggID)
+            if #available(macOS 14.2, *) {
+                AudioHardwareDestroyProcessTap(tapID)
+            }
+        case .screenCaptureKit(let stream):
             try? await stream.stopCapture()
+        case nil:
+            if let stream {
+                try? await stream.stopCapture()
+            }
         }
+        self.activeEngine = nil
         self.stream = nil
 
         let endHostTime = CMClockGetTime(CMClockGetHostTimeClock())
@@ -165,15 +377,13 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
         }
     }
 
+    // MARK: - ScreenCaptureKit Stream Delegate
+
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio, sampleBuffer.isValid else { return }
-
-        // Ignore incoming buffers while paused
         guard !isPaused else { return }
-
         guard let pcmBuffer = AVAudioPCMBuffer(sampleBuffer: sampleBuffer) else { return }
 
-        // Calculate live audio level
         let level = calculateLevel(from: pcmBuffer)
         levelState.withLock { state in
             state.currentLevel = level
@@ -223,13 +433,19 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
             }
         }
 
-        try? audioFile.write(from: pcmBuffer)
+        do {
+            try audioFile.write(from: pcmBuffer)
+        } catch {
+            print("ERROR writing system audio: \(error)")
+        }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         // Best-effort capture: a mid-recording failure here just means the
         // merged note falls back to mic-only audio at mixing time.
     }
+
+    // MARK: - Level Metering and Silence Fill
 
     private func calculateLevel(from buffer: AVAudioPCMBuffer) -> Float {
         var maxSample: Float = 0.0
@@ -238,22 +454,46 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
 
         if let floatChannelData = buffer.floatChannelData {
             let channelCount = Int(buffer.format.channelCount)
-            for ch in 0..<channelCount {
-                let ptr = floatChannelData[ch]
-                var channelPeak: Float = 0.0
-                vDSP_maxmgv(ptr, 1, &channelPeak, vDSP_Length(frameLength))
-                if channelPeak > maxSample {
-                    maxSample = channelPeak
+            let isInterleaved = buffer.format.isInterleaved
+            if isInterleaved {
+                let ptr = floatChannelData[0]
+                for ch in 0..<channelCount {
+                    var channelPeak: Float = 0.0
+                    vDSP_maxmgv(ptr.advanced(by: ch), channelCount, &channelPeak, vDSP_Length(frameLength))
+                    if channelPeak > maxSample {
+                        maxSample = channelPeak
+                    }
+                }
+            } else {
+                for ch in 0..<channelCount {
+                    let ptr = floatChannelData[ch]
+                    var channelPeak: Float = 0.0
+                    vDSP_maxmgv(ptr, 1, &channelPeak, vDSP_Length(frameLength))
+                    if channelPeak > maxSample {
+                        maxSample = channelPeak
+                    }
                 }
             }
         } else if let int16ChannelData = buffer.int16ChannelData {
             let channelCount = Int(buffer.format.channelCount)
-            for ch in 0..<channelCount {
-                let ptr = int16ChannelData[ch]
-                for i in 0..<frameLength {
+            let isInterleaved = buffer.format.isInterleaved
+            if isInterleaved {
+                let ptr = int16ChannelData[0]
+                let totalSamples = frameLength * channelCount
+                for i in 0..<totalSamples {
                     let absVal = Float(abs(Int32(ptr[i]))) / 32768.0
                     if absVal > maxSample {
                         maxSample = absVal
+                    }
+                }
+            } else {
+                for ch in 0..<channelCount {
+                    let ptr = int16ChannelData[ch]
+                    for i in 0..<frameLength {
+                        let absVal = Float(abs(Int32(ptr[i]))) / 32768.0
+                        if absVal > maxSample {
+                            maxSample = absVal
+                        }
                     }
                 }
             }
@@ -294,10 +534,6 @@ final class SystemAudioRecorder: NSObject, SCStreamOutput, SCStreamDelegate, @un
 }
 
 private extension AVAudioPCMBuffer {
-    /// ScreenCaptureKit delivers audio as `CMSampleBuffer`s, but the rest of
-    /// AVFoundation (and our mixer) works with `AVAudioPCMBuffer`. There's no
-    /// direct initializer for that on macOS, so the raw PCM bytes are copied
-    /// out via the lower-level Core Media buffer-list APIs.
     convenience init?(sampleBuffer: CMSampleBuffer) {
         guard let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer) else {
             return nil
